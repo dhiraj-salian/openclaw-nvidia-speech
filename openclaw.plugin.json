@@ -1,0 +1,38 @@
+{
+  "id": "nvidia-speech",
+  "name": "NVIDIA Speech (TTS + STT)",
+  "description": "Adds NVIDIA TTS (Magpie Multilingual) and STT (Parakeet CTC) providers to OpenClaw using only your NVIDIA_API_KEY. No Google, no OpenAI, no Deepgram required.",
+  "version": "0.1.0",
+  "activation": {
+    "onStartup": false
+  },
+  "enabledByDefault": false,
+  "setup": {
+    "providers": [
+      {
+        "id": "nvidia",
+        "envVars": ["NVIDIA_API_KEY"]
+      }
+    ]
+  },
+  "contracts": {
+    "speechProviders": ["nvidia"],
+    "mediaUnderstandingProviders": ["nvidia"]
+  },
+  "mediaUnderstandingProviderMetadata": {
+    "nvidia": {
+      "capabilities": ["audio"],
+      "defaultModels": {
+        "audio": "parakeet-ctc-1.1b-en-multilingual"
+      },
+      "autoPriority": {
+        "audio": 50
+      }
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
