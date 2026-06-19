@@ -348,3 +348,138 @@ describe("createNvidiaSpeechProvider — listVoices", () => {
     expect(voices[1]?.id).toBe("Bram");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Profile-fallback tests — last-resort read from shell profile files.
+// ---------------------------------------------------------------------------
+
+describe("createNvidiaSpeechProvider — profile-fallback (last-resort)", () => {
+  function fakeProfileReader(contents: string | null): {
+    profileReader: { os: { homedir: () => string }; fs: { existsSync: () => boolean; readFileSync: () => string } };
+  } {
+    const profileReader = {
+      os: { homedir: () => "/home/fake" },
+      fs: {
+        existsSync: () => contents !== null,
+        readFileSync: () => (contents ?? ""),
+      },
+    };
+    return { profileReader };
+  }
+
+  beforeEach(() => {
+    process.env.NVIDIA_API_KEY = "";
+  });
+
+  it("isConfigured returns true when profile contains NVIDIA_API_KEY and env is empty", () => {
+    const { profileReader } = fakeProfileReader(
+      'export NVIDIA_API_KEY="nvapi-from-profile"\n',
+    );
+    const provider = createNvidiaSpeechProvider({
+      http: new FakeHttpClient(),
+      env: {},
+      profileReader,
+    });
+    expect(
+      provider.isConfigured({
+        providerConfig: {},
+        timeoutMs: 30_000,
+      } as unknown as Parameters<typeof provider.isConfigured>[0]),
+    ).toBe(true);
+  });
+
+  it("isConfigured returns false when no apiKey anywhere AND no profile reader wired", () => {
+    const provider = createNvidiaSpeechProvider({
+      http: new FakeHttpClient(),
+      env: {},
+      // no profileReader
+    });
+    expect(
+      provider.isConfigured({
+        providerConfig: {},
+        timeoutMs: 30_000,
+      } as unknown as Parameters<typeof provider.isConfigured>[0]),
+    ).toBe(false);
+  });
+
+  it("synthesize uses profile-derived key when env + config are empty", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "audio/wav" },
+      body: new Uint8Array([0x52, 0x49, 0x46, 0x46]), // "RIFF" magic
+    });
+    const { profileReader } = fakeProfileReader(
+      'export NVIDIA_API_KEY="nvapi-from-profile"\n',
+    );
+    const provider = createNvidiaSpeechProvider({
+      http,
+      env: {},
+      profileReader,
+    });
+
+    await provider.synthesize({
+      text: "hello from profile",
+      cfg: undefined,
+      providerConfig: {},
+      target: { kind: "test" },
+      timeoutMs: 30_000,
+    } as unknown as Parameters<typeof provider.synthesize>[0]);
+
+    const sent = http.calls[0]!;
+    expect(sent.headers["Authorization"]).toBe("Bearer nvapi-from-profile");
+  });
+
+  it("synthesize prefers env over profile when both are set", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "audio/wav" },
+      body: new Uint8Array([0x52, 0x49, 0x46, 0x46]),
+    });
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "audio/wav" },
+      body: new Uint8Array([0x52, 0x49, 0x46, 0x46]),
+    });
+    const { profileReader } = fakeProfileReader(
+      'export NVIDIA_API_KEY="nvapi-from-profile"\n',
+    );
+    const provider = createNvidiaSpeechProvider({
+      http,
+      env: { NVIDIA_API_KEY: "nvapi-from-env" },
+      profileReader,
+    });
+
+    await provider.synthesize({
+      text: "hi",
+      cfg: undefined,
+      providerConfig: {},
+      target: { kind: "test" },
+      timeoutMs: 30_000,
+    } as unknown as Parameters<typeof provider.synthesize>[0]);
+
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer nvapi-from-env");
+  });
+
+  it("listVoices uses profile-derived key when env + config are empty", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { voices: [{ voice_id: "Aria", language_code: "en-US", gender: "female" }] },
+    });
+    const { profileReader } = fakeProfileReader(
+      'export NVIDIA_API_KEY="nvapi-profile-voices"\n',
+    );
+    const provider = createNvidiaSpeechProvider({
+      http,
+      env: {},
+      profileReader,
+    });
+
+    const voices = await provider.listVoices!({} as Parameters<NonNullable<typeof provider.listVoices>>[0]);
+    expect(voices[0]?.id).toBe("Aria");
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer nvapi-profile-voices");
+  });
+});

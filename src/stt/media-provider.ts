@@ -42,6 +42,14 @@ export interface NvidiaMediaProviderOptions {
    * customisation; in production we always want NVIDIA_DEFAULT_STT_MODEL.
    */
   readonly defaultModel?: string;
+  /**
+   * Optional profile-fallback reader. When supplied, the provider will
+   * scan the user's shell profile files (`.bashrc`, `.zshrc`, …) for a
+   * `NVIDIA_API_KEY=…` export as a last-resort fallback. Mirrors the
+   * bundled `elevenlabs` plugin's `resolveElevenLabsApiKeyWithProfileFallback`
+   * pattern. Omit to disable profile fallback (legacy behaviour).
+   */
+  readonly profileReader?: import("../utils/secret-resolver.js").ProfileReader;
 }
 
 /**
@@ -72,6 +80,7 @@ export function createNvidiaMediaUnderstandingProvider(
   const env = options.env ?? process.env;
   const defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000;
   const defaultModel = options.defaultModel ?? NVIDIA_DEFAULT_STT_MODEL;
+  const profileReader = options.profileReader;
 
   const sttClient = new NvidiaSttClient(options.http);
 
@@ -84,13 +93,19 @@ export function createNvidiaMediaUnderstandingProvider(
     async transcribeAudio(req) {
       // Resolve API key. Throw MissingApiKeyError if not configured; the
       // runtime turns that into a user-friendly "no key" message.
-      const apiKey =
-        (typeof req.apiKey === "string" && req.apiKey.trim()) ||
-        resolveApiKey({
+      let apiKey: string | undefined =
+        typeof req.apiKey === "string" && req.apiKey.trim()
+          ? req.apiKey.trim()
+          : undefined;
+
+      if (!apiKey) {
+        apiKey = resolveApiKey({
           provided: undefined,
           envVar,
           env,
+          ...(profileReader ? { profileReader } : {}),
         });
+      }
 
       // Pull config from the standard `providerConfig` loose shape. The
       // runtime passes it via `req.request?.headers` / `req.auth`, but for

@@ -340,3 +340,116 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Profile-fallback tests — last-resort read from shell profile files.
+// ---------------------------------------------------------------------------
+
+// Profile-fallback tests — last-resort read from shell profile files.
+// ---------------------------------------------------------------------------
+
+describe("createNvidiaMediaUnderstandingProvider — profile-fallback (last-resort)", () => {
+  function fakeProfileReader(contents: string | null): {
+    profileReader: { os: { homedir: () => string }; fs: { existsSync: () => boolean; readFileSync: () => string } };
+  } {
+    const profileReader = {
+      os: { homedir: () => "/home/fake" },
+      fs: {
+        existsSync: () => contents !== null,
+        readFileSync: () => (contents ?? ""),
+      },
+    };
+    return { profileReader };
+  }
+
+  it("transcribeAudio uses profile-derived key when env + req.apiKey are empty", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { text: "hello from profile", model: "parakeet-ctc-1.1b-en-multilingual" },
+    });
+    const { profileReader } = fakeProfileReader(
+      'export NVIDIA_API_KEY="nvapi-stt-from-profile"\n',
+    );
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      env: {},
+      profileReader,
+    });
+
+    const result = await provider.transcribeAudio({
+      buffer: Buffer.from([0x52, 0x49, 0x46, 0x46]),
+      fileName: "test.wav",
+      mime: "audio/wav",
+      apiKey: "",
+      timeoutMs: 30_000,
+    });
+
+    expect(result.text).toBe("hello from profile");
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer nvapi-stt-from-profile");
+  });
+
+  it("transcribeAudio prefers req.apiKey over profile fallback", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { text: "direct-key", model: "parakeet" },
+    });
+    const { profileReader } = fakeProfileReader(
+      'export NVIDIA_API_KEY="nvapi-from-profile"\n',
+    );
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      env: {},
+      profileReader,
+    });
+
+    await provider.transcribeAudio({
+      buffer: Buffer.from([0x52, 0x49, 0x46, 0x46]),
+      fileName: "test.wav",
+      mime: "audio/wav",
+      apiKey: "nvapi-direct",
+      timeoutMs: 30_000,
+    });
+
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer nvapi-direct");
+  });
+
+  it("transcribeAudio throws MissingApiKeyError when nothing is available and no profile reader wired", async () => {
+    const http = new FakeHttpClient();
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      env: {},
+    });
+    await expect(
+      provider.transcribeAudio({
+        buffer: Buffer.from([0x00]),
+        fileName: "x.wav",
+        mime: "audio/wav",
+        apiKey: "",
+        timeoutMs: 30_000,
+      }),
+    ).rejects.toBeInstanceOf(MissingApiKeyError);
+  });
+
+  it("transcribeAudio throws MissingApiKeyError when profile reader returns null", async () => {
+    const http = new FakeHttpClient();
+    const { profileReader } = fakeProfileReader(null);
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      env: {},
+      profileReader,
+    });
+    await expect(
+      provider.transcribeAudio({
+        buffer: Buffer.from([0x00]),
+        fileName: "x.wav",
+        mime: "audio/wav",
+        apiKey: "",
+        timeoutMs: 30_000,
+      }),
+    ).rejects.toBeInstanceOf(MissingApiKeyError);
+  });
+});

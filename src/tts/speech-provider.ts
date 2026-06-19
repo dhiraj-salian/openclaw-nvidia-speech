@@ -34,6 +34,7 @@ import {
 } from "../config/defaults.js";
 import {
   resolveApiKey,
+  readApiKeyFromProfile,
   MissingApiKeyError,
   redactConfig,
 } from "../utils/secret-resolver.js";
@@ -48,6 +49,14 @@ export interface NvidiaSpeechProviderOptions {
   readonly envVar?: string;
   /** Default timeout (ms) when caller doesn't specify one. */
   readonly defaultTimeoutMs?: number;
+  /**
+   * Optional profile-fallback reader. When supplied, the provider will
+   * scan the user's shell profile files (`.bashrc`, `.zshrc`, …) for a
+   * `NVIDIA_API_KEY=…` export as a last-resort fallback. Mirrors the
+   * bundled `elevenlabs` plugin's `resolveElevenLabsApiKeyWithProfileFallback`
+   * pattern. Omit to disable profile fallback (legacy behaviour).
+   */
+  readonly profileReader?: import("../utils/secret-resolver.js").ProfileReader;
 }
 
 /** Overrides we accept from `providerConfig` + `providerOverrides`. */
@@ -102,6 +111,7 @@ export function createNvidiaSpeechProvider(
   const envVar = options.envVar ?? "NVIDIA_API_KEY";
   const env = options.env ?? process.env;
   const defaultTimeoutMs = options.defaultTimeoutMs ?? 30_000;
+  const profileReader = options.profileReader;
 
   const ttsClient = new NvidiaTtsClient(options.http);
   const voicesClient = new VoicesClient(options.http);
@@ -113,13 +123,14 @@ export function createNvidiaSpeechProvider(
     const cfg = providerConfig ?? {};
     const over = providerOverrides ?? {};
 
-    // API key: providerConfig.apiKey (string or SecretRef) → env.
+    // API key: providerConfig.apiKey (string or SecretRef) → env → profile.
     // We swallow the error here and re-throw inside synthesize so the
     // error path is consistent and the message stays useful.
     const apiKey = resolveApiKey({
       provided: cfg.apiKey,
       envVar,
       env,
+      ...(profileReader ? { profileReader } : {}),
     });
 
     const baseUrl =
@@ -175,7 +186,17 @@ export function createNvidiaSpeechProvider(
         return true;
       }
       const fromEnv = env[envVar];
-      return typeof fromEnv === "string" && fromEnv.trim().length > 0;
+      if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return true;
+      // Last-resort: profile-fallback reader.
+      if (profileReader) {
+        try {
+          const fromProfile = readApiKeyFromProfile({ ...profileReader, envVar });
+          return typeof fromProfile === "string" && fromProfile.length > 0;
+        } catch {
+          return false;
+        }
+      }
+      return false;
     },
 
     async synthesize(req) {
@@ -279,16 +300,25 @@ export function createNvidiaSpeechProvider(
     async listVoices(req) {
       // Pull config (apiKey + baseUrl) from providerConfig or direct overrides.
       const cfg = (req.providerConfig ?? {}) as Record<string, unknown>;
-      const apiKey =
+      const cfgApiKey =
         (typeof cfg.apiKey === "string" && cfg.apiKey) ||
         (cfg.apiKey &&
         typeof cfg.apiKey === "object" &&
         "value" in cfg.apiKey &&
         typeof (cfg.apiKey as { value: unknown }).value === "string"
           ? ((cfg.apiKey as { value: string }).value as string)
-          : "") ||
+          : "");
+
+      let apiKey: string =
+        cfgApiKey ||
         req.apiKey ||
         (env[envVar] ?? "");
+
+      // Profile fallback as last resort.
+      if (!apiKey && profileReader) {
+        const fromProfile = readApiKeyFromProfile({ ...profileReader, envVar });
+        if (fromProfile) apiKey = fromProfile;
+      }
 
       if (!apiKey) throw new MissingApiKeyError("No API key for voices listing");
 

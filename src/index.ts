@@ -19,6 +19,7 @@ import { FetchHttpClient } from "./http/fetch-http-client.js";
 import { RetryHttpClient } from "./http/retry-http-client.js";
 import { createNvidiaSpeechProvider } from "./tts/speech-provider.js";
 import { createNvidiaMediaUnderstandingProvider } from "./stt/media-provider.js";
+import { buildDefaultProfileReader } from "./utils/secret-resolver.js";
 import type { HttpClient } from "./http/http-client.js";
 
 // Re-exports for advanced integrators / tests.
@@ -32,7 +33,15 @@ export {
   NvTimeoutError,
   type NvErrorKind,
 } from "./http/errors.js";
-export { MissingApiKeyError } from "./utils/secret-resolver.js";
+export {
+  MissingApiKeyError,
+  readApiKeyFromProfile,
+  buildDefaultProfileReader,
+  PROFILE_CANDIDATES,
+  type ProfileReader,
+  type ProfileReaderFs,
+  type ProfileReaderOs,
+} from "./utils/secret-resolver.js";
 export {
   NVIDIA_DEFAULT_BASE_URL,
   NVIDIA_DEFAULT_TTS_MODEL,
@@ -115,6 +124,15 @@ function buildDefaultHttp(): HttpClient {
   });
 }
 
+/**
+ * Default profile reader — scans $HOME/.profile, .zprofile, .zshrc, .bashrc
+ * for `NVIDIA_API_KEY=…`. Wired into both providers below so users who
+ * keep the key in their shell profile don't need to duplicate it in
+ * `openclaw.json` or `process.env`. Matches the bundled elevenlabs plugin's
+ * `resolveElevenLabsApiKeyWithProfileFallback` pattern.
+ */
+const defaultProfileReader = buildDefaultProfileReader();
+
 const plugin: OpenClawPluginEntry = definePluginEntry({
   id: "nvidia-speech",
   name: "NVIDIA Speech (TTS + STT)",
@@ -127,17 +145,17 @@ const plugin: OpenClawPluginEntry = definePluginEntry({
 
     // TTS — speechProvider id `nvidia` (per openclaw.plugin.json contracts).
     api.registerSpeechProvider?.(
-      createNvidiaSpeechProvider({ http }),
+      createNvidiaSpeechProvider({ http, profileReader: defaultProfileReader }),
     );
 
     // STT — mediaUnderstandingProvider id `nvidia` (per contracts).
     api.registerMediaUnderstandingProvider?.(
-      createNvidiaMediaUnderstandingProvider({ http }),
+      createNvidiaMediaUnderstandingProvider({ http, profileReader: defaultProfileReader }),
     );
 
     api.logger?.info?.(
       "nvidia-speech plugin registered: speechProvider=nvidia " +
-        "mediaUnderstandingProvider=nvidia",
+        "mediaUnderstandingProvider=nvidia (profile-fallback enabled)",
     );
   },
 });
