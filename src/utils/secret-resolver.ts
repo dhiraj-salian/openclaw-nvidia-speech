@@ -24,6 +24,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
 
 export interface ResolveApiKeyOptions {
   /** Config-time apiKey field; if present, takes priority over env + profile. */
@@ -238,4 +239,364 @@ export function redactConfig<T extends Record<string, unknown>>(config: T): Omit
   const { apiKey: _apiKey, ...rest } = config;
   void _apiKey;
   return rest;
+}
+
+// ---------------------------------------------------------------------------
+// Auth-profile integration (OpenClaw runtime auth store)
+//
+// The runtime at `openclaw/plugin-sdk/provider-auth-runtime` exposes
+// `resolveApiKeyForProvider({ provider, cfg, profileId, agentDir })` which
+// walks the same auth profile store the bundled `nvidia` chat provider
+// uses (`auth.profiles.nvidia:default` etc.). That means a single NVIDIA key
+// configured once in OpenClaw's auth profile serves BOTH the chat
+// provider and our TTS/STT plugin — no duplicate configuration.
+//
+// We import the SDK helper lazily so that callers without the runtime
+// present (e.g. unit tests, build-time scripts) still work via the legacy
+// chain below.
+//
+// IMPORTANT: a bare `await import("openclaw/plugin-sdk/provider-auth-runtime")`
+// does NOT work from a plugin's dist/index.js — the plugin's own
+// `node_modules` doesn't have `openclaw` as a dependency (esbuild keeps
+// it external per scripts/build.mjs). Node's ESM loader searches relative
+// to the importing file's URL, not the host process. The fix is to use
+// `createRequire` anchored to a known file inside the OpenClaw
+// installation so Node's CommonJS resolver finds the SDK relative to
+// THAT directory. We try a few candidate anchors (env var, well-known
+// global paths, process.argv path-walk) and cache the first that works.
+// ---------------------------------------------------------------------------
+
+/**
+ * Anchor filenames we use to build a `createRequire` rooted inside an
+ * OpenClaw installation. The actual probe logic lives in
+ * `loadOpenClawSdk()` below; this constant is kept here as a
+ * documentation marker for the env-var override path. (See the
+ * OPENCLAW_PLUGIN_SDK_ANCHOR branch in `loadOpenClawSdk`.)
+ */
+const OPENCLAW_PLUGIN_SDK_ANCHOR_ENV = "OPENCLAW_PLUGIN_SDK_ANCHOR";
+
+/**
+ * Cached SDK require function. Null = never tried yet. Resolved = the
+ * require fn anchored to the openclaw install's directory. Throws are
+ * swallowed and recorded as `null` so subsequent calls short-circuit.
+ */
+let cachedSdkRequire: ((mod: string) => unknown) | null | undefined;
+
+/**
+ * Probe well-known install locations for the openclaw SDK and return a
+ * require function rooted there. Returns null when nothing matches —
+ * callers fall back to the legacy chain in that case.
+ *
+ * Strategies (in order):
+ *   1. `OPENCLAW_PLUGIN_SDK_ANCHOR` env var (any file inside the
+ *      openclaw install).
+ *   2. Common global npm locations: `$npm_config_prefix/lib/node_modules/openclaw`
+ *      resolved via `npm root -g`, plus `~/.npm-global/lib/node_modules/openclaw`
+ *      and `/usr/local/lib/node_modules/openclaw` as last-ditch defaults.
+ *   3. The `process.argv[1]` of the host (the gateway entry script) —
+ *      its parent's parent's parent is typically the openclaw install.
+ */
+function loadOpenClawSdk(): ((mod: string) => unknown) | null {
+  if (cachedSdkRequire !== undefined) return cachedSdkRequire;
+
+  const t0 = Date.now();
+  const anchors: string[] = [];
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    console.warn("[nvidia-speech] loadOpenClawSdk: starting...");
+  }
+  // Periodic heartbeat so we can see if it's blocked vs taking time.
+  let heartbeat: NodeJS.Timeout | undefined;
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    heartbeat = setInterval(() => {
+      const elapsed = Date.now() - t0;
+      console.warn(`[nvidia-speech] loadOpenClawSdk heartbeat: ${elapsed}ms elapsed`);
+    }, 200);
+  }
+
+  // Strategy 1: explicit env var.
+  if (process.env[OPENCLAW_PLUGIN_SDK_ANCHOR_ENV]) {
+    anchors.push(process.env[OPENCLAW_PLUGIN_SDK_ANCHOR_ENV] as string);
+  }
+
+  // Strategy 2: well-known global npm locations.
+  const home = homedir();
+  const wellKnownInstalls: readonly string[] = [
+    join(home, ".npm-global", "lib", "node_modules", "openclaw"),
+    "/usr/local/lib/node_modules/openclaw",
+    "/usr/lib/node_modules/openclaw",
+    join(home, ".nvm", "versions", "node", process.versions.node, "lib", "node_modules", "openclaw"),
+  ];
+  for (const installRoot of wellKnownInstalls) {
+    const pkgJson = join(installRoot, "package.json");
+    if (existsSync(pkgJson)) anchors.push(pkgJson);
+  }
+
+  // Strategy 3: process.argv[1] (the script that started this process).
+  // For the gateway that's `<install>/dist/index.js`; `<install>` is two
+  // levels up. For unit tests it's something else entirely — that's
+  // fine, the file won't exist there and we move on.
+  try {
+    const argv1 = process.argv[1];
+    if (typeof argv1 === "string" && argv1.length > 0) {
+      // Resolve relative to cwd if needed.
+      const resolved = argv1.startsWith("/") ? argv1 : join(process.cwd(), argv1);
+      if (existsSync(resolved)) {
+        const pkgJson = join(resolved, "..", "..", "package.json");
+        if (existsSync(pkgJson)) anchors.push(pkgJson);
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // Try each anchor — the first one whose require resolves the SDK wins.
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    console.warn(`[nvidia-speech] loadOpenClawSdk: probing ${anchors.length} anchor(s):`, anchors);
+  }
+  for (let i = 0; i < anchors.length; i++) {
+    const anchor = anchors[i];
+    if (!anchor) continue;
+    try {
+      const installRoot = anchor.replace(/\/package\.json$/, "");
+      const internalAnchor = join(installRoot, "dist", "plugin-sdk", "index.js");
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(`[nvidia-speech] anchor[${i}] checking ${internalAnchor}`);
+      }
+      if (!existsSync(internalAnchor)) {
+        if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+          console.warn(
+            `[nvidia-speech] SDK anchor miss: ${internalAnchor} does not exist`,
+          );
+        }
+        continue;
+      }
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(`[nvidia-speech] anchor[${i}] creating require...`);
+      }
+      const req = createRequire(internalAnchor);
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(`[nvidia-speech] anchor[${i}] requiring ./provider-auth-runtime.js ...`);
+      }
+      const sdk = req("./provider-auth-runtime.js") as {
+        resolveApiKeyForProvider?: unknown;
+      };
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(`[nvidia-speech] anchor[${i}] require returned; sdk resolveApiKeyForProvider type:`, typeof sdk?.resolveApiKeyForProvider);
+      }
+      if (sdk && typeof sdk.resolveApiKeyForProvider === "function") {
+        if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+          console.warn(`[nvidia-speech] anchor[${i}] ✓ resolved; caching`);
+        }
+        cachedSdkRequire = req;
+        if (heartbeat) clearInterval(heartbeat);
+        return cachedSdkRequire;
+      }
+    } catch (err) {
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(
+          `[nvidia-speech] SDK load failed for anchor ${anchor}:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    }
+  }
+
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    console.warn(
+      `[nvidia-speech] No OpenClaw SDK anchor worked. Tried: ${anchors.length} paths.`,
+    );
+  }
+  if (heartbeat) clearInterval(heartbeat);
+  cachedSdkRequire = null;
+  return null;
+}
+
+/**
+ * Test/debug helper: forget the cached SDK require so the next call
+ * re-probes. Useful when the install path changes (e.g. switching
+ * profiles or rebuilding the openclaw install).
+ */
+export function __resetOpenClawSdkCacheForTests(): void {
+  cachedSdkRequire = undefined;
+}
+
+/**
+ * Minimal slice of the OpenClaw auth config we touch. Kept loose on
+ * purpose: the SDK's full `OpenClawConfig` is wide and we don't want to
+ * duplicate it here.
+ */
+export interface NvidiaAuthProfileConfig {
+  readonly auth?: {
+    readonly profiles?: Record<
+      string,
+      { readonly provider?: string; readonly mode?: string }
+    >;
+  };
+}
+
+/**
+ * Shape returned by the runtime resolver. We only use `.apiKey`.
+ */
+export interface ResolvedNvidiaAuth {
+  readonly apiKey?: string;
+  readonly profileId?: string;
+  readonly source?: string;
+}
+
+/**
+ * Options for the async auth-profile-aware resolver.
+ *
+ * Resolution order (mirrors the bundled `nvidia` chat plugin):
+ *   1. Explicit `provided` (e.g. from `providerConfig.apiKey`).
+ *   2. Runtime auth profile store via `resolveApiKeyForProvider`
+ *      (i.e. `openclaw config get auth.profiles['nvidia:default']` etc.).
+ *   3. Legacy chain: `process.env[envVar]` → shell-profile fallback.
+ *   4. Throw `MissingApiKeyError`.
+ */
+export interface ResolveNvidiaApiKeyOptions {
+  /** Explicit apiKey override (providerConfig.apiKey from the request). */
+  readonly provided?: unknown;
+  /** Env var name; defaults to NVIDIA_API_KEY. */
+  readonly envVar?: string;
+  /** OpenClaw config — pass `api.config` from `register(api)`. */
+  readonly cfg?: NvidiaAuthProfileConfig | undefined;
+  /** Optional preferred profile id (overrides auto-detect). */
+  readonly profileId?: string;
+  /** Optional agent dir (multi-agent setups). */
+  readonly agentDir?: string;
+  /** Env override for tests. Defaults to `process.env`. */
+  readonly env?: Record<string, string | undefined>;
+  /** Optional profile-fallback reader (legacy). */
+  readonly profileReader?: ProfileReader;
+}
+
+/**
+ * Async resolver: NVIDIA API key, profile-aware.
+ *
+ * When `cfg` is provided, this delegates to the OpenClaw runtime's
+ * `resolveApiKeyForProvider({ provider: "nvidia", cfg, profileId, agentDir })`
+ * which walks `auth.profiles` and selects the matching profile
+ * (`nvidia:default`, etc.). This is the **same code path** the bundled
+ * `nvidia` chat provider uses, so a single configured key serves both.
+ *
+ * On resolution failure (no profile, missing key, SDK not loadable), we
+ * fall back to the legacy `resolveApiKey` chain so unit tests and
+ * build-time scripts keep working.
+ *
+ * CRITICAL: never log the resolved value, even at debug level.
+ */
+export async function resolveNvidiaApiKey(
+  options: ResolveNvidiaApiKeyOptions = {},
+): Promise<string> {
+  const envVar = options.envVar ?? "NVIDIA_API_KEY";
+
+  // 1) Explicit override (providerConfig.apiKey) wins over everything.
+  const provided = coerceProvided(options.provided);
+  if (provided) return provided;
+
+  // 2) Runtime auth profile (only if cfg is supplied).
+  if (options.cfg) {
+    try {
+      // The bare `await import("openclaw/plugin-sdk/...")` form fails
+      // with ERR_MODULE_NOT_FOUND from a plugin's dist (the plugin's
+      // node_modules has no `openclaw` entry — esbuild keeps it
+      // external). Anchor the require to the openclaw install's
+      // package.json via createRequire so Node's CommonJS resolver
+      // walks up from there and finds the SDK subpath.
+      const req = loadOpenClawSdk();
+      if (req) {
+        const sdk = req("./provider-auth-runtime.js") as {
+          resolveApiKeyForProvider?: (
+            p: Record<string, unknown>,
+          ) => Promise<ResolvedNvidiaAuth | null | undefined>;
+        };
+        if (sdk && typeof sdk.resolveApiKeyForProvider === "function") {
+          const resolved = await sdk.resolveApiKeyForProvider({
+            provider: "nvidia",
+            cfg: options.cfg as unknown as Record<string, unknown>,
+            profileId: options.profileId,
+            agentDir: options.agentDir,
+          });
+          const apiKey = resolved?.apiKey;
+          if (typeof apiKey === "string" && apiKey.trim().length > 0) {
+            return apiKey.trim();
+          }
+        }
+      }
+    } catch {
+      // SDK errored — fall through to the legacy chain.
+    }
+  }
+
+  // 3) Legacy chain: explicit env → shell profile → throw.
+  return resolveApiKey({
+    envVar,
+    ...(options.env ? { env: options.env } : {}),
+    ...(options.profileReader ? { profileReader: options.profileReader } : {}),
+  });
+}
+
+/**
+ * Build a memoised async resolver for the NVIDIA API key.
+ *
+ * Use this in plugin factories so the expensive runtime auth lookup runs
+ * at most once per factory lifetime. After the first resolution, the
+ * memoised function returns synchronously from cache. On failure the
+ * legacy chain is consulted so unit tests / dev shells keep working.
+ *
+ * Example:
+ *   const getApiKey = createCachedNvidiaApiKeyResolver({
+ *     cfg: api.config,
+ *     agentDir,
+ *     profileReader: buildDefaultProfileReader(),
+ *   });
+ *   const apiKey = await getApiKey(); // first call: hits profile store
+ *   const apiKey2 = await getApiKey(); // subsequent: cache hit
+ */
+export interface CachedNvidiaApiKeyResolverOptions
+  extends ResolveNvidiaApiKeyOptions {}
+
+export interface CachedNvidiaApiKeyResolver {
+  (): Promise<string>;
+  /** Synchronous peek at the cached value; undefined until first resolve. */
+  readonly peek: () => string | undefined;
+  /** Force a re-resolve on the next call. */
+  readonly invalidate: () => void;
+}
+
+export function createCachedNvidiaApiKeyResolver(
+  options: CachedNvidiaApiKeyResolverOptions = {},
+): CachedNvidiaApiKeyResolver {
+  let cached: { value: string } | undefined;
+  let inflight: Promise<string> | undefined;
+
+  const doResolve = (): Promise<string> => {
+    inflight = resolveNvidiaApiKey(options)
+      .then((value) => {
+        cached = { value };
+        return value;
+      })
+      .catch((err) => {
+        // Don't cache failures — let the next call retry (e.g. after the
+        // user adds a profile). Re-throw so callers see the real error.
+        throw err;
+      })
+      .finally(() => {
+        inflight = undefined;
+      });
+    return inflight;
+  };
+
+  const fn = (): Promise<string> => {
+    if (cached) return Promise.resolve(cached.value);
+    if (inflight) return inflight;
+    return doResolve();
+  };
+
+  return Object.assign(fn, {
+    peek: () => cached?.value,
+    invalidate: () => {
+      cached = undefined;
+    },
+  });
 }

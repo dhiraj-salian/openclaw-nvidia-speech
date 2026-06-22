@@ -35,6 +35,9 @@ import {
 import {
   resolveApiKey,
   readApiKeyFromProfile,
+  createCachedNvidiaApiKeyResolver,
+  type CachedNvidiaApiKeyResolver,
+  type NvidiaAuthProfileConfig,
   MissingApiKeyError,
   redactConfig,
 } from "../utils/secret-resolver.js";
@@ -57,6 +60,19 @@ export interface NvidiaSpeechProviderOptions {
    * pattern. Omit to disable profile fallback (legacy behaviour).
    */
   readonly profileReader?: import("../utils/secret-resolver.js").ProfileReader;
+  /**
+   * Optional OpenClaw config (`api.config` from `register(api)`). When
+   * present, the provider resolves the API key via the runtime auth
+   * profile store (same source the bundled `nvidia` chat provider uses),
+   * so a single configured key serves both. Falls back to the legacy
+   * chain if the runtime resolver isn't available or returns nothing.
+   */
+  readonly cfg?: NvidiaAuthProfileConfig | undefined;
+  /**
+   * Optional agent dir for scoped auth-profile lookups (multi-agent
+   * setups). Defaults to undefined (global profile store).
+   */
+  readonly agentDir?: string;
 }
 
 /** Overrides we accept from `providerConfig` + `providerOverrides`. */
@@ -105,6 +121,20 @@ function stripTrailingSlash(s: string): string {
   return s.endsWith("/") ? s.slice(0, -1) : s;
 }
 
+/**
+ * Coerce whatever OpenClaw passes as `apiKey` into a clean string.
+ * Accepts a raw string or a SecretRef-like `{ value }` object. Returns
+ * undefined when the input is missing, empty, or the wrong shape.
+ */
+function coerceProvidedApiKey(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  if (value && typeof value === "object" && "value" in value) {
+    const inner = (value as { value: unknown }).value;
+    if (typeof inner === "string" && inner.trim().length > 0) return inner.trim();
+  }
+  return undefined;
+}
+
 export function createNvidiaSpeechProvider(
   options: NvidiaSpeechProviderOptions,
 ): NvidiaSpeechProvider {
@@ -116,6 +146,73 @@ export function createNvidiaSpeechProvider(
   const ttsClient = new NvidiaTtsClient(options.http);
   const voicesClient = new VoicesClient(options.http);
 
+  // Memoised async resolver — first call hits the OpenClaw runtime
+  // auth-profile store (same source the bundled `nvidia` chat provider
+  // uses), subsequent calls hit cache. Falls back to the legacy chain
+  // (env / shell profile) on failure or when no `cfg` is wired.
+  const cachedKey: CachedNvidiaApiKeyResolver = createCachedNvidiaApiKeyResolver({
+    envVar,
+    env,
+    ...(profileReader ? { profileReader } : {}),
+    ...(options.cfg ? { cfg: options.cfg } : {}),
+    ...(options.agentDir ? { agentDir: options.agentDir } : {}),
+  });
+  // Kick off resolution eagerly so the first synthesize/listVoices call
+  // (typically right after plugin load) hits a warm cache. Fire-and-forget;
+  // any error is deferred to the next explicit `getApiKey()` call.
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    console.warn("[nvidia-speech] [tts] kicking off eager resolve...");
+  }
+  cachedKey()
+    .then((v) => {
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(
+          `[nvidia-speech] [tts] eager resolveNvidiaApiKey succeeded, key length: ${v.length}`,
+        );
+      }
+    })
+    .catch((err) => {
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(
+          `[nvidia-speech] [tts] eager resolveNvidiaApiKey FAILED:`,
+          err instanceof Error ? err.message : String(err),
+          err instanceof Error ? err.stack : "",
+        );
+      }
+    });
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    setTimeout(() => {
+      const peeked = cachedKey.peek();
+      console.warn(
+        `[nvidia-speech] [tts] 500ms after register: peek = ${
+          peeked ? `len=${peeked.length}` : "undefined"
+        }`,
+      );
+    }, 500);
+  }
+
+  /**
+   * Resolve the API key synchronously using the best-known source at call
+   * time. Priority:
+   *   1. Explicit `providerConfig.apiKey` (string or SecretRef-like).
+   *   2. Cached value from the OpenClaw runtime auth-profile resolver.
+   *   3. Legacy chain: env → shell-profile reader.
+   */
+  function getApiKey(providerConfig: Record<string, unknown> | undefined): string {
+    const cfg = providerConfig ?? {};
+    const provided = coerceProvidedApiKey(cfg.apiKey);
+    if (provided) return provided;
+
+    const cached = cachedKey.peek();
+    if (cached) return cached;
+
+    return resolveApiKey({
+      envVar,
+      env,
+      ...(profileReader ? { profileReader } : {}),
+    });
+  }
+
   function resolveTtsCall(
     providerConfig: Record<string, unknown> | undefined,
     providerOverrides: Record<string, unknown> | undefined,
@@ -123,15 +220,8 @@ export function createNvidiaSpeechProvider(
     const cfg = providerConfig ?? {};
     const over = providerOverrides ?? {};
 
-    // API key: providerConfig.apiKey (string or SecretRef) → env → profile.
-    // We swallow the error here and re-throw inside synthesize so the
-    // error path is consistent and the message stays useful.
-    const apiKey = resolveApiKey({
-      provided: cfg.apiKey,
-      envVar,
-      env,
-      ...(profileReader ? { profileReader } : {}),
-    });
+    // API key: explicit providerConfig.apiKey → cached auth-profile → env/profile.
+    const apiKey = getApiKey(providerConfig);
 
     const baseUrl =
       (typeof cfg.baseUrl === "string" && cfg.baseUrl.trim()) || NVIDIA_DEFAULT_BASE_URL;
@@ -174,17 +264,10 @@ export function createNvidiaSpeechProvider(
     isConfigured(ctx) {
       // Same precedence as synthesize, but non-throwing.
       const cfg = (ctx.providerConfig ?? {}) as Record<string, unknown>;
-      const provided = cfg.apiKey;
-      if (typeof provided === "string" && provided.trim().length > 0) return true;
-      if (
-        provided &&
-        typeof provided === "object" &&
-        "value" in provided &&
-        typeof (provided as { value: unknown }).value === "string" &&
-        ((provided as { value: string }).value ?? "").trim().length > 0
-      ) {
-        return true;
-      }
+      if (coerceProvidedApiKey(cfg.apiKey)) return true;
+      // Cached auth-profile value (already resolved).
+      const cached = cachedKey.peek();
+      if (cached) return true;
       const fromEnv = env[envVar];
       if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return true;
       // Last-resort: profile-fallback reader.
@@ -300,18 +383,10 @@ export function createNvidiaSpeechProvider(
     async listVoices(req) {
       // Pull config (apiKey + baseUrl) from providerConfig or direct overrides.
       const cfg = (req.providerConfig ?? {}) as Record<string, unknown>;
-      const cfgApiKey =
-        (typeof cfg.apiKey === "string" && cfg.apiKey) ||
-        (cfg.apiKey &&
-        typeof cfg.apiKey === "object" &&
-        "value" in cfg.apiKey &&
-        typeof (cfg.apiKey as { value: unknown }).value === "string"
-          ? ((cfg.apiKey as { value: string }).value as string)
-          : "");
-
       let apiKey: string =
-        cfgApiKey ||
+        coerceProvidedApiKey(cfg.apiKey) ||
         req.apiKey ||
+        cachedKey.peek() ||
         (env[envVar] ?? "");
 
       // Profile fallback as last resort.

@@ -105,4 +105,53 @@ describe("plugin entry", () => {
     expect(plugin).toBeDefined();
     expect((plugin as unknown as { id: string }).id).toBe("nvidia-speech");
   });
+
+  // -----------------------------------------------------------------------
+  // Auth-profile wiring through `register(api)`:
+  //   api.config should be forwarded into both provider factories so the
+  //   runtime auth-profile store is consulted for the API key.
+  // -----------------------------------------------------------------------
+
+  it("forwards api.config into both provider factories", () => {
+    let speechProviderIsConfigured: ((ctx: unknown) => boolean) | undefined;
+    let sttProviderTranscribe: unknown;
+    const api: OpenClawPluginApi = {
+      registerSpeechProvider(provider) {
+        const sp = provider as {
+          isConfigured: (ctx: unknown) => boolean;
+        };
+        speechProviderIsConfigured = sp.isConfigured;
+      },
+      registerMediaUnderstandingProvider(provider) {
+        sttProviderTranscribe = (provider as { transcribeAudio: unknown }).transcribeAudio;
+      },
+      logger: { info() {}, warn() {}, error() {}, debug() {} },
+      config: {
+        auth: { profiles: { "nvidia:default": { provider: "nvidia" } } },
+      },
+    };
+
+    plugin.register(api);
+
+    // Both providers were registered with isConfigured / transcribeAudio
+    // present, proving the factories accepted the forwarded cfg without
+    // throwing. (Behavioural coverage of cfg-driven key resolution lives
+    // inside speech-provider.test.ts / media-provider.test.ts.)
+    expect(typeof speechProviderIsConfigured).toBe("function");
+    expect(typeof sttProviderTranscribe).toBe("function");
+  });
+
+  it("falls back gracefully when api.config is absent (setup-only loader mode)", () => {
+    const calls: string[] = [];
+    const api: OpenClawPluginApi = {
+      registerSpeechProvider() {
+        calls.push("speech");
+      },
+      registerMediaUnderstandingProvider() {
+        calls.push("stt");
+      },
+    };
+    expect(() => plugin.register(api)).not.toThrow();
+    expect(calls).toEqual(["speech", "stt"]);
+  });
 });

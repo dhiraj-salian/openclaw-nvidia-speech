@@ -453,3 +453,70 @@ describe("createNvidiaMediaUnderstandingProvider — profile-fallback (last-reso
     ).rejects.toBeInstanceOf(MissingApiKeyError);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Auth-profile integration: factory accepts `cfg` / `agentDir` options.
+// ---------------------------------------------------------------------------
+
+describe("createNvidiaMediaUnderstandingProvider — cfg + agentDir factory options", () => {
+  it("accepts cfg without throwing at factory build time", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      cfg: { auth: { profiles: { "nvidia:default": { provider: "nvidia" } } } },
+      agentDir: "/tmp/agent-1",
+    });
+    expect(provider.id).toBe("nvidia");
+    expect(provider.capabilities).toContain("audio");
+  });
+
+  it("omitting cfg + agentDir keeps legacy behaviour", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+    });
+    expect(provider.id).toBe("nvidia");
+  });
+
+  it("explicit req.apiKey wins over cfg + env", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      body: { text: "ok", model: "parakeet-x" },
+      headers: { "content-type": "application/json" },
+    });
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      cfg: { auth: { profiles: { "nvidia:default": { provider: "nvidia" } } } } as never,
+      env: { NVIDIA_API_KEY: "***" },
+    });
+    await provider.transcribeAudio({
+      buffer: Buffer.from([0x00]),
+      fileName: "x.wav",
+      mime: "audio/wav",
+      apiKey: "req-wins",
+      timeoutMs: 30_000,
+    });
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer req-wins");
+  });
+
+  it("falls back to env when cfg is present but no apiKey is resolvable from it", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      body: { text: "ok", model: "parakeet-x" },
+      headers: { "content-type": "application/json" },
+    });
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      cfg: { auth: { profiles: { "nvidia:default": { provider: "nvidia" } } } } as never,
+      env: { NVIDIA_API_KEY: "from-env-fallback" },
+    });
+    await provider.transcribeAudio({
+      buffer: Buffer.from([0x00]),
+      fileName: "x.wav",
+      mime: "audio/wav",
+      apiKey: "",
+      timeoutMs: 30_000,
+    });
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer from-env-fallback");
+  });
+});

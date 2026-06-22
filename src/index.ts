@@ -37,10 +37,17 @@ export {
   MissingApiKeyError,
   readApiKeyFromProfile,
   buildDefaultProfileReader,
+  resolveNvidiaApiKey,
+  createCachedNvidiaApiKeyResolver,
   PROFILE_CANDIDATES,
   type ProfileReader,
   type ProfileReaderFs,
   type ProfileReaderOs,
+  type NvidiaAuthProfileConfig,
+  type ResolveNvidiaApiKeyOptions,
+  type CachedNvidiaApiKeyResolver,
+  type CachedNvidiaApiKeyResolverOptions,
+  type ResolvedNvidiaAuth,
 } from "./utils/secret-resolver.js";
 export {
   NVIDIA_DEFAULT_BASE_URL,
@@ -89,7 +96,18 @@ export interface OpenClawPluginApi {
     readonly error?: (msg: string, err?: unknown) => void;
     readonly debug?: (msg: string) => void;
   };
+  /**
+   * OpenClaw's full user config — passed in by the runtime at `register()`
+   * time. We forward it to the provider factories so they can resolve
+   * the API key through the runtime auth-profile store (same source the
+   * bundled `nvidia` chat provider uses). Optional because the field is
+   * not present in every loader mode (e.g. setup-only).
+   */
   readonly config?: Record<string, unknown>;
+  /**
+   * Optional agent dir for scoped auth-profile lookups (multi-agent setups).
+   */
+  readonly agentDir?: string;
 }
 
 /**
@@ -141,21 +159,55 @@ const plugin: OpenClawPluginEntry = definePluginEntry({
     "to OpenClaw using only your NVIDIA_API_KEY. No Google, no OpenAI, no " +
     "Deepgram required.",
   register(api) {
+    if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+      console.warn(
+        "[nvidia-speech] register() called, api.config keys:",
+        api.config ? Object.keys(api.config as object).slice(0, 10) : "(undefined)",
+      );
+    }
     const http = buildDefaultHttp();
+
+    // Forward OpenClaw's runtime config to both providers so they can
+    // resolve the API key through the same auth-profile store the bundled
+    // `nvidia` chat provider uses (e.g. `auth.profiles['nvidia:default']`).
+    // When `api.config` is absent (setup-only loader modes) we simply
+    // pass `undefined` and the providers fall back to the legacy chain
+    // (env → shell profile).
+    const cfg = api.config;
+    const agentDir = api.agentDir;
+    if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+      console.warn(
+        "[nvidia-speech] cfg truthy:",
+        !!cfg,
+        "agentDir:",
+        agentDir ?? "(undefined)",
+      );
+    }
 
     // TTS — speechProvider id `nvidia` (per openclaw.plugin.json contracts).
     api.registerSpeechProvider?.(
-      createNvidiaSpeechProvider({ http, profileReader: defaultProfileReader }),
+      createNvidiaSpeechProvider({
+        http,
+        profileReader: defaultProfileReader,
+        ...(cfg ? { cfg } : {}),
+        ...(agentDir ? { agentDir } : {}),
+      }),
     );
 
     // STT — mediaUnderstandingProvider id `nvidia` (per contracts).
     api.registerMediaUnderstandingProvider?.(
-      createNvidiaMediaUnderstandingProvider({ http, profileReader: defaultProfileReader }),
+      createNvidiaMediaUnderstandingProvider({
+        http,
+        profileReader: defaultProfileReader,
+        ...(cfg ? { cfg } : {}),
+        ...(agentDir ? { agentDir } : {}),
+      }),
     );
 
     api.logger?.info?.(
       "nvidia-speech plugin registered: speechProvider=nvidia " +
-        "mediaUnderstandingProvider=nvidia (profile-fallback enabled)",
+        "mediaUnderstandingProvider=nvidia " +
+        (cfg ? "(auth-profile store wired)" : "(profile-fallback only)"),
     );
   },
 });

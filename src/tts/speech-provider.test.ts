@@ -483,3 +483,68 @@ describe("createNvidiaSpeechProvider — profile-fallback (last-resort)", () => 
     expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer nvapi-profile-voices");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Auth-profile integration: factory accepts `cfg` / `agentDir` options and
+// delegates to the runtime auth-profile store via the memoised resolver.
+// ---------------------------------------------------------------------------
+
+describe("createNvidiaSpeechProvider — cfg + agentDir factory options", () => {
+  it("accepts cfg without throwing at factory build time", () => {
+    const provider = createNvidiaSpeechProvider({
+      http: new FakeHttpClient(),
+      cfg: { auth: { profiles: { "nvidia:default": { provider: "nvidia" } } } },
+      agentDir: "/tmp/agent-1",
+    });
+    expect(provider.id).toBe("nvidia");
+  });
+
+  it("accepts cfg with no auth profiles without throwing", () => {
+    const provider = createNvidiaSpeechProvider({
+      http: new FakeHttpClient(),
+      cfg: { auth: { profiles: {} } },
+    });
+    expect(provider.id).toBe("nvidia");
+  });
+
+  it("omitting cfg + agentDir keeps legacy behaviour (already covered by other tests)", () => {
+    const provider = createNvidiaSpeechProvider({ http: new FakeHttpClient() });
+    expect(provider.id).toBe("nvidia");
+    expect(typeof provider.synthesize).toBe("function");
+  });
+
+  it("explicit providerConfig.apiKey wins even when cfg is wired", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      body: new Uint8Array([0x52, 0x49, 0x46, 0x46]), // "RIFF" — synth response prefix
+      headers: { "content-type": "audio/wav" },
+    });
+    const provider = createNvidiaSpeechProvider({
+      http,
+      cfg: { auth: { profiles: { "nvidia:default": { provider: "nvidia" } } } } as never,
+      env: { NVIDIA_API_KEY: "***" },
+    });
+    await provider.synthesize(
+      makeSynthReq({ providerConfig: { apiKey: "explicit-wins" } }),
+    );
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer explicit-wins");
+  });
+
+  it("falls back to env when cfg is present but no apiKey is resolvable from it", async () => {
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      body: new Uint8Array([0x52, 0x49, 0x46, 0x46]),
+      headers: { "content-type": "audio/wav" },
+    });
+    const provider = createNvidiaSpeechProvider({
+      http,
+      // cfg has profiles but no real SDK present in tests → fallback to env.
+      cfg: { auth: { profiles: { "nvidia:default": { provider: "nvidia" } } } } as never,
+      env: { NVIDIA_API_KEY: "from-env-fallback" },
+    });
+    await provider.synthesize(makeSynthReq({}));
+    expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer from-env-fallback");
+  });
+});

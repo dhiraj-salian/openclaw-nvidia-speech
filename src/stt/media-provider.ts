@@ -25,6 +25,9 @@ import {
 } from "../config/defaults.js";
 import {
   resolveApiKey,
+  createCachedNvidiaApiKeyResolver,
+  type CachedNvidiaApiKeyResolver,
+  type NvidiaAuthProfileConfig,
   MissingApiKeyError,
 } from "../utils/secret-resolver.js";
 import { NvidiaSttClient } from "./nvidia-stt-client.js";
@@ -50,6 +53,19 @@ export interface NvidiaMediaProviderOptions {
    * pattern. Omit to disable profile fallback (legacy behaviour).
    */
   readonly profileReader?: import("../utils/secret-resolver.js").ProfileReader;
+  /**
+   * Optional OpenClaw config (`api.config` from `register(api)`). When
+   * present, the provider resolves the API key via the runtime auth
+   * profile store (same source the bundled `nvidia` chat provider uses),
+   * so a single configured key serves both. Falls back to the legacy
+   * chain if the runtime resolver isn't available or returns nothing.
+   */
+  readonly cfg?: NvidiaAuthProfileConfig | undefined;
+  /**
+   * Optional agent dir for scoped auth-profile lookups (multi-agent
+   * setups). Defaults to undefined (global profile store).
+   */
+  readonly agentDir?: string;
 }
 
 /**
@@ -73,6 +89,20 @@ function asNonEmptyString(v: unknown): string | undefined {
   return typeof v === "string" && v.trim().length > 0 ? v.trim() : undefined;
 }
 
+/**
+ * Coerce whatever OpenClaw passes as `apiKey` into a clean string.
+ * Accepts a raw string or a SecretRef-like `{ value }` object. Returns
+ * undefined when the input is missing, empty, or the wrong shape.
+ */
+function coerceProvidedApiKey(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim().length > 0) return value.trim();
+  if (value && typeof value === "object" && "value" in value) {
+    const inner = (value as { value: unknown }).value;
+    if (typeof inner === "string" && inner.trim().length > 0) return inner.trim();
+  }
+  return undefined;
+}
+
 export function createNvidiaMediaUnderstandingProvider(
   options: NvidiaMediaProviderOptions,
 ): NvidiaMediaUnderstandingProvider {
@@ -84,6 +114,76 @@ export function createNvidiaMediaUnderstandingProvider(
 
   const sttClient = new NvidiaSttClient(options.http);
 
+  // Memoised async resolver — first call hits the OpenClaw runtime
+  // auth-profile store (same source the bundled `nvidia` chat provider
+  // uses), subsequent calls hit cache. Falls back to the legacy chain
+  // (env / shell profile) on failure or when no `cfg` is wired.
+  const cachedKey: CachedNvidiaApiKeyResolver = createCachedNvidiaApiKeyResolver({
+    envVar,
+    env,
+    ...(profileReader ? { profileReader } : {}),
+    ...(options.cfg ? { cfg: options.cfg } : {}),
+    ...(options.agentDir ? { agentDir: options.agentDir } : {}),
+  });
+  // Kick off resolution eagerly so the first transcribeAudio call
+  // (typically right after plugin load) hits a warm cache.
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    console.warn("[nvidia-speech] [stt] kicking off eager resolve...");
+  }
+  cachedKey()
+    .then((v) => {
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(
+          `[nvidia-speech] [stt] eager resolveNvidiaApiKey succeeded, key length: ${v.length}`,
+        );
+      }
+    })
+    .catch((err) => {
+      if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+        console.warn(
+          `[nvidia-speech] [stt] eager resolveNvidiaApiKey FAILED:`,
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+    });
+  if (process.env.NVIDIA_SPEECH_PLUGIN_DEBUG) {
+    setTimeout(() => {
+      const peeked = cachedKey.peek();
+      console.warn(
+        `[nvidia-speech] [stt] 500ms after register: peek = ${
+          peeked ? `len=${peeked.length}` : "undefined"
+        }`,
+      );
+    }, 500);
+  }
+
+  /**
+   * Resolve the API key synchronously using the best-known source at call
+   * time. Priority:
+   *   1. `req.apiKey` (caller-provided direct key, e.g. from request auth).
+   *   2. Explicit `providerConfig.apiKey` (string or SecretRef-like).
+   *   3. Cached value from the OpenClaw runtime auth-profile resolver.
+   *   4. Legacy chain: env → shell-profile reader.
+   */
+  function getApiKey(
+    reqApiKey: string | undefined,
+    providerConfig: Record<string, unknown> | undefined,
+  ): string {
+    if (typeof reqApiKey === "string" && reqApiKey.trim().length > 0) {
+      return reqApiKey.trim();
+    }
+    const cfg = providerConfig ?? {};
+    const provided = coerceProvidedApiKey(cfg.apiKey);
+    if (provided) return provided;
+    const cached = cachedKey.peek();
+    if (cached) return cached;
+    return resolveApiKey({
+      envVar,
+      env,
+      ...(profileReader ? { profileReader } : {}),
+    });
+  }
+
   return {
     id: "nvidia",
     capabilities: ["audio"],
@@ -93,19 +193,7 @@ export function createNvidiaMediaUnderstandingProvider(
     async transcribeAudio(req) {
       // Resolve API key. Throw MissingApiKeyError if not configured; the
       // runtime turns that into a user-friendly "no key" message.
-      let apiKey: string | undefined =
-        typeof req.apiKey === "string" && req.apiKey.trim()
-          ? req.apiKey.trim()
-          : undefined;
-
-      if (!apiKey) {
-        apiKey = resolveApiKey({
-          provided: undefined,
-          envVar,
-          env,
-          ...(profileReader ? { profileReader } : {}),
-        });
-      }
+      const apiKey = getApiKey(req.apiKey, req.providerConfig);
 
       // Pull config from the standard `providerConfig` loose shape. The
       // runtime passes it via `req.request?.headers` / `req.auth`, but for
