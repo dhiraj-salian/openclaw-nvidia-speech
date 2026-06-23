@@ -20,7 +20,8 @@
 
 import type { HttpClient } from "../http/http-client.js";
 import {
-  NVIDIA_DEFAULT_BASE_URL,
+  NVIDIA_DEFAULT_BASE_URL_STT,
+  NVIDIA_DEFAULT_STT_LANGUAGE,
   NVIDIA_DEFAULT_STT_MODEL,
 } from "../config/defaults.js";
 import {
@@ -204,7 +205,7 @@ export function createNvidiaMediaUnderstandingProvider(
       const baseUrl =
         (typeof req.baseUrl === "string" && req.baseUrl.trim()) ||
         (typeof cfg.baseUrl === "string" && cfg.baseUrl) ||
-        NVIDIA_DEFAULT_BASE_URL;
+        NVIDIA_DEFAULT_BASE_URL_STT;
 
       const model =
         asNonEmptyString(req.model) ||
@@ -212,10 +213,14 @@ export function createNvidiaMediaUnderstandingProvider(
         asNonEmptyString(cfg.model) ||
         defaultModel;
 
+      // Language is REQUIRED for the NVCF Parakeet endpoint. Fall back to
+      // the configured default (en-US) if nothing else is supplied, so
+      // callers that don't set language still get a useful result.
       const language =
         asNonEmptyString(req.language) ||
         asNonEmptyString(cfg.sttLanguage) ||
-        asNonEmptyString(cfg.language);
+        asNonEmptyString(cfg.language) ||
+        NVIDIA_DEFAULT_STT_LANGUAGE;
 
       const result = await sttClient.transcribe({
         apiKey,
@@ -235,6 +240,7 @@ export function createNvidiaMediaUnderstandingProvider(
       return {
         text: result.text,
         model: result.model,
+        language,
       };
     },
   };
@@ -276,5 +282,5 @@ export interface NvidiaMediaUnderstandingProvider {
     readonly timeoutMs: number;
     /** Loose providerConfig for this provider (apiKey/baseUrl/etc.). */
     readonly providerConfig?: Record<string, unknown>;
-  }): Promise<{ text: string; model?: string }>;
+  }): Promise<{ text: string; model?: string; language?: string }>;
 }

@@ -16,7 +16,7 @@ import {
   NVIDIA_DEFAULT_TTS_MODEL,
   NVIDIA_DEFAULT_TTS_SAMPLE_RATE,
   NVIDIA_DEFAULT_TTS_VOICE,
-  NVIDIA_DEFAULT_BASE_URL,
+  NVIDIA_DEFAULT_BASE_URL_TTS,
 } from "../config/defaults.js";
 import { FakeHttpClient } from "../http/fake-http-client.js";
 import { MissingApiKeyError } from "../utils/secret-resolver.js";
@@ -143,23 +143,27 @@ describe("createNvidiaSpeechProvider — synthesize (happy path)", () => {
 
     await provider.synthesize(
       makeSynthReq({
-        providerConfig: { apiKey: "nvapi-1", baseUrl: NVIDIA_DEFAULT_BASE_URL },
+        providerConfig: { apiKey: "nvapi-1", baseUrl: NVIDIA_DEFAULT_BASE_URL_TTS },
       }),
     );
 
     expect(fake.calls).toHaveLength(1);
     const sent = fake.calls[0]!;
-    expect(sent.url).toBe(`${NVIDIA_DEFAULT_BASE_URL}/audio/synthesize`);
+    expect(sent.url).toBe(`${NVIDIA_DEFAULT_BASE_URL_TTS}/audio/synthesize`);
     expect(sent.method).toBe("POST");
     expect(sent.headers["Authorization"]).toBe("Bearer nvapi-1");
 
-    const body = sent.body as { kind: "json"; value: Record<string, unknown> };
-    expect(body.kind).toBe("json");
-    expect(body.value.text).toBe("Hello world");
-    expect(body.value.voice_name).toBe(NVIDIA_DEFAULT_TTS_VOICE);
-    expect(body.value.model).toBe(NVIDIA_DEFAULT_TTS_MODEL);
-    expect(body.value.language_code).toBe(NVIDIA_DEFAULT_TTS_LANGUAGE);
-    expect(body.value.sample_rate_hz).toBe(NVIDIA_DEFAULT_TTS_SAMPLE_RATE);
+    const body = sent.body as { kind: "formData"; value: FormData };
+    expect(body.kind).toBe("formData");
+    expect(body.value.get("text")).toBe("Hello world");
+    expect(body.value.get("voice")).toBe(NVIDIA_DEFAULT_TTS_VOICE);
+    expect(body.value.get("language")).toBe(NVIDIA_DEFAULT_TTS_LANGUAGE);
+    // Field names verified against Magpie /openapi.json on 2026-06-23:
+    //   sample_rate_hz (not sample_rate), no model/format/stream fields.
+    expect(body.value.get("sample_rate_hz")).toBe(String(NVIDIA_DEFAULT_TTS_SAMPLE_RATE));
+    expect(body.value.has("model")).toBe(false);
+    expect(body.value.has("format")).toBe(false);
+    expect(body.value.has("stream")).toBe(false);
   });
 
   it("returns SpeechSynthesisResult with Buffer + voice metadata", async () => {
@@ -203,11 +207,15 @@ describe("createNvidiaSpeechProvider — synthesize (happy path)", () => {
       }),
     );
 
-    const body = fake.calls[0]!.body as { kind: "json"; value: Record<string, unknown> };
-    expect(body.value.voice_name).toBe("Custom.Voice");
-    expect(body.value.language_code).toBe("hi-IN");
-    expect(body.value.audio_format).toBe("flac");
-    expect(body.value.sample_rate_hz).toBe(48000);
+    const body = fake.calls[0]!.body as { kind: "formData"; value: FormData };
+    expect(body.value.get("voice")).toBe("Custom.Voice");
+    expect(body.value.get("language")).toBe("hi-IN");
+    // `format` and `model` overrides are accepted by the provider but
+    // NOT sent over the wire (the function URL encodes the model; output
+    // container is implied by Accept / LINEAR_PCM default).
+    expect(body.value.has("format")).toBe(false);
+    expect(body.value.has("model")).toBe(false);
+    expect(body.value.get("sample_rate_hz")).toBe("48000");
   });
 
   it("falls back to NVIDIA_API_KEY env when providerConfig has no apiKey", async () => {

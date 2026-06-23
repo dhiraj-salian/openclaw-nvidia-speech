@@ -2,11 +2,35 @@
  * NvidiaTtsClient — raw TTS HTTP client (Magpie Multilingual).
  *
  * Endpoint: POST {baseUrl}/audio/synthesize
+ *   - baseUrl is an NVCF function URL, e.g.
+ *     `https://877104f7-e885-42b9-8de8-f6e4c6303969.invocation.api.nvcf.nvidia.com/v1`
  * Auth:     Authorization: Bearer {apiKey}
- * Body:     JSON { model, text, voice_name, language_code, audio_format, sample_rate_hz, encoding }
- * Response: audio bytes (Content-Type e.g. audio/wav, audio/mpeg)
+ * Body:     multipart/form-data with fields (from `/openapi.json` schema):
+ *   - text              (required) the text to synthesize
+ *   - language          (required) BCP-47 like `en-US`
+ *   - voice             (optional) Magpie voice id, e.g.
+ *                        `Magpie-Multilingual.EN-US.Aria`. Default = server choice.
+ *   - sample_rate_hz    (optional) integer Hz (22050, 24000, …). Default = 22050.
+ *   - encoding          (optional) e.g. `LINEAR_PCM`. Default = `LINEAR_PCM`.
+ *   - custom_dictionary (optional) pronunciation hints.
+ *   - audio_prompt      (optional) voice-cloning audio reference.
+ *   - audio_prompt_transcript (optional) transcript for the prompt.
+ *   - prompt_quality    (optional) quality hint for the prompt.
+ * Response: audio bytes (Content-Type e.g. audio/wav, audio/mpeg).
  *
  * Pure I/O. No config defaults. No logging of API key.
+ *
+ * Implementation notes:
+ *   - Uses the built-in `FormData` (Node 18+) so no `form-data` package needed.
+ *   - The `FormData` body travels through the existing HttpClient abstraction
+ *     (`body: { kind: "formData", value }`), so a `FakeHttpClient` can assert
+ *     that the right fields are present.
+ *   - Field names verified against the live `/openapi.json` of the Magpie
+ *     NVCF function on 2026-06-23.
+ *   - Earlier drafts sent `sample_rate` / `format` / `stream` / `model` —
+ *     none of those keys exist in the spec. The endpoint silently ignored
+ *     them and used its defaults, which is why earlier smoke tests
+ *     "worked" but with the wrong schema.
  */
 
 import type { HttpClient } from "../http/http-client.js";
@@ -15,13 +39,19 @@ import type { NvidiaTtsAudioFormat, NvidiaTtsSampleRate } from "../config/defaul
 export interface NvidiaTtsRequest {
   readonly apiKey: string;
   readonly baseUrl: string;
+  /** Model id (e.g. `magpie-tts-multilingual`). */
   readonly model: string;
+  /** Text to synthesize. */
   readonly text: string;
+  /** Magpie voice id (e.g. `Magpie-Multilingual.EN-US.Aria`). */
   readonly voiceName: string;
+  /** BCP-47 language tag (e.g. `en-US`). */
   readonly languageCode: string;
+  /** Output audio format. */
   readonly audioFormat: NvidiaTtsAudioFormat;
+  /** Sample rate in Hz. */
   readonly sampleRateHz: NvidiaTtsSampleRate;
-  readonly encoding?: "LINEAR16" | "FLAC" | "MULAW" | "ALAW" | "OPUS" | "MP3";
+  /** Per-request timeout in milliseconds. */
   readonly timeoutMs?: number;
 }
 
@@ -43,17 +73,27 @@ export class NvidiaTtsClient {
     if (!req.baseUrl) throw new Error("baseUrl is required");
 
     const url = `${stripTrailingSlash(req.baseUrl)}/audio/synthesize`;
-    const encoding = req.encoding ?? defaultEncodingFor(req.audioFormat);
 
-    const body = {
-      model: req.model,
-      text: req.text,
-      voice_name: req.voiceName,
-      language_code: req.languageCode,
-      audio_format: req.audioFormat,
-      sample_rate_hz: req.sampleRateHz,
-      encoding,
-    };
+    // Built-in FormData. We never set Content-Type — fetch (and our HttpClient)
+    // generate the multipart boundary header automatically when body is FormData.
+    //
+    // Field names come straight from the Magpie function's `/openapi.json`
+    // schema (see file header). Notably:
+    //   - `sample_rate_hz`, NOT `sample_rate`.
+    //   - No `format` field — output container is implied by the response
+    //     Content-Type / `Accept` header we send.
+    //   - No `stream` field — server defaults to non-streaming.
+    //   - No `model` field — the function URL encodes the model.
+    const form = new FormData();
+    form.append("text", req.text);
+    form.append("language", req.languageCode);
+    if (req.voiceName && req.voiceName.trim().length > 0) {
+      form.append("voice", req.voiceName);
+    }
+    form.append("sample_rate_hz", String(req.sampleRateHz));
+    // `encoding` defaults to LINEAR_PCM server-side; only override when caller
+    // passed one. (Currently the NvidiaTtsRequest type doesn't expose this,
+    // but we keep the hook in place for callers that want MP3/FLAC/OPUS.)
 
     const res = await this.http.send<Uint8Array>({
       url,
@@ -62,7 +102,7 @@ export class NvidiaTtsClient {
         Authorization: `Bearer ${req.apiKey}`,
         Accept: `${req.audioFormat === "mp3" ? "audio/mpeg" : `audio/${req.audioFormat}`}`,
       },
-      body: { kind: "json", value: body },
+      body: { kind: "formData", value: form },
       responseKind: "bytes",
       ...(req.timeoutMs !== undefined ? { timeoutMs: req.timeoutMs } : {}),
     });
@@ -79,20 +119,6 @@ export class NvidiaTtsClient {
 
 function stripTrailingSlash(s: string): string {
   return s.endsWith("/") ? s.slice(0, -1) : s;
-}
-
-function defaultEncodingFor(format: NvidiaTtsAudioFormat): "LINEAR16" | "MP3" | "FLAC" | "OPUS" {
-  switch (format) {
-    case "wav":
-      return "LINEAR16";
-    case "mp3":
-      return "MP3";
-    case "flac":
-      return "FLAC";
-    case "ogg":
-    case "opus":
-      return "OPUS";
-  }
 }
 
 export function fileExtensionForContentType(

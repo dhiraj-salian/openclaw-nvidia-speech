@@ -81,7 +81,7 @@ describe("plugin entry", () => {
     expect(provider.capabilities).toContain("audio");
     expect(typeof provider.transcribeAudio).toBe("function");
     const defaultModels = provider.defaultModels as Record<string, unknown>;
-    expect(defaultModels.audio).toBe("parakeet-ctc-1.1b-en-multilingual");
+    expect(defaultModels.audio).toBe("parakeet-ctc-1.1b-en-us");
     const autoPriority = provider.autoPriority as Record<string, unknown>;
     expect(autoPriority.audio).toBe(50);
   });

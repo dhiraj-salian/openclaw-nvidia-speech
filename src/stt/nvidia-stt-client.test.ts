@@ -3,8 +3,8 @@ import { FakeHttpClient } from "../http/fake-http-client.js";
 import { NvidiaSttClient } from "./nvidia-stt-client.js";
 import { NvSpeechError } from "../http/errors.js";
 
-const BASE = "https://integrate.api.nvidia.com/v1";
-const MODEL = "parakeet-ctc-1.1b-en-multilingual";
+const BASE = "https://1598d209-5e27-4d3c-8079-4751568b1081.invocation.api.nvcf.nvidia.com/v1";
+const MODEL = "parakeet-ctc-1.1b-en-multilingual"; // historical default — kept for compat with caller configs
 
 /** Tiny fake audio buffer (16 bytes of zeros — content doesn't matter for HTTP-shape tests). */
 function fakeAudio(): Buffer {
@@ -27,6 +27,8 @@ describe("NvidiaSttClient.transcribe", () => {
     });
 
     expect(result.text).toBe("hello world");
+    // No `model` is echoed back from the server in the live API, so the
+    // client falls back to the caller's `req.model` (preserved verbatim).
     expect(result.model).toBe(MODEL);
 
     const sent = fake.calls[0]!;
@@ -40,8 +42,12 @@ describe("NvidiaSttClient.transcribe", () => {
     expect(sent.body?.kind).toBe("formData");
     if (sent.body?.kind !== "formData") throw new Error("body kind");
     const form = sent.body.value as FormData;
-    expect(form.get("model")).toBe(MODEL);
+    // Language defaults to en-US when caller omits it.
+    expect(form.get("language")).toBe("en-US");
     expect(form.get("response_format")).toBe("json");
+    // Crucially, NO `model` field — the NVCF function URL encodes its
+    // model, and sending `model=<anything>` is rejected with HTTP 400.
+    expect(form.has("model")).toBe(false);
 
     const file = form.get("file");
     expect(file).toBeInstanceOf(Blob);
@@ -79,7 +85,7 @@ describe("NvidiaSttClient.transcribe", () => {
     expect(fd.get("prompt")).toBe("transcribe punctuation");
   });
 
-  it("omits language and prompt fields when not provided", async () => {
+  it("always sends language (defaults to en-US when caller omits)", async () => {
     const fake = new FakeHttpClient();
     fake.queueResponse({ status: 200, body: { text: "ok" } });
     const client = new NvidiaSttClient(fake);
@@ -96,7 +102,7 @@ describe("NvidiaSttClient.transcribe", () => {
     const form = fake.calls[0]!.body;
     if (form?.kind !== "formData") throw new Error("form kind");
     const fd = form.value as FormData;
-    expect(fd.has("language")).toBe(false);
+    expect(fd.get("language")).toBe("en-US");
     expect(fd.has("prompt")).toBe(false);
   });
 
@@ -169,20 +175,21 @@ describe("NvidiaSttClient.transcribe", () => {
     ).rejects.toThrow(/apiKey is required/);
   });
 
-  it("rejects missing model", async () => {
+  it("does not require model (NVCF encodes it in the URL)", async () => {
     const fake = new FakeHttpClient();
+    fake.queueResponse({ status: 200, body: { text: "ok" } });
     const client = new NvidiaSttClient(fake);
 
-    await expect(
-      client.transcribe({
-        apiKey: "k",
-        baseUrl: BASE,
-        model: "   ",
-        audio: fakeAudio(),
-        fileName: "a.wav",
-        mime: "audio/wav",
-      }),
-    ).rejects.toThrow(/model is required/);
+    // Both `model` and `language` omitted should still succeed: the
+    // client defaults `language` to `en-US` and leaves `model` unset.
+    const result = await client.transcribe({
+      apiKey: "k",
+      baseUrl: BASE,
+      audio: fakeAudio(),
+      fileName: "a.wav",
+      mime: "audio/wav",
+    });
+    expect(result.text).toBe("ok");
   });
 
   it("rejects missing fileName", async () => {

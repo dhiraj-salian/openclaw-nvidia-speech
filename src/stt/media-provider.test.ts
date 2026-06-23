@@ -3,7 +3,7 @@ import { FakeHttpClient } from "../http/fake-http-client.js";
 import { createNvidiaMediaUnderstandingProvider } from "./media-provider.js";
 import { MissingApiKeyError } from "../utils/secret-resolver.js";
 
-const BASE = "https://integrate.api.nvidia.com/v1";
+const BASE = "https://1598d209-5e27-4d3c-8079-4751568b1081.invocation.api.nvcf.nvidia.com/v1";
 
 function fakeAudio(): Buffer {
   return Buffer.from(new Uint8Array(16));
@@ -19,7 +19,7 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
 
       expect(provider.id).toBe("nvidia");
       expect(provider.capabilities).toEqual(["audio"]);
-      expect(provider.defaultModels.audio).toBe("parakeet-ctc-1.1b-en-multilingual");
+      expect(provider.defaultModels.audio).toBe("parakeet-ctc-1.1b-en-us");
       expect(provider.autoPriority.audio).toBe(50);
       expect(typeof provider.transcribeAudio).toBe("function");
     });
@@ -53,7 +53,7 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
       });
 
       expect(result.text).toBe("hello");
-      expect(result.model).toBe("parakeet-ctc-1.1b-en-multilingual");
+      expect(result.model).toBe("parakeet-ctc-1.1b-en-us");
 
       const sent = fake.calls[0]!;
       expect(sent.headers["Authorization"]).toBe("Bearer direct-key");
@@ -99,7 +99,7 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
       expect(fake.calls).toHaveLength(0);
     });
 
-    it("respects model override from req.model", async () => {
+    it("respects model override from req.model (preserved in result, NOT sent on wire)", async () => {
       const fake = new FakeHttpClient();
       fake.queueResponse({ status: 200, body: { text: "ok" } });
       const provider = createNvidiaMediaUnderstandingProvider({
@@ -107,7 +107,7 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
         env: { NVIDIA_API_KEY: "k" },
       });
 
-      await provider.transcribeAudio({
+      const result = await provider.transcribeAudio({
         apiKey: "k",
         model: "parakeet-ctc-0.6b-en",
         buffer: fakeAudio(),
@@ -116,9 +116,13 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
         timeoutMs: 5000,
       });
 
+      // The chosen model is preserved on the result so callers can see what
+      // they configured. It is NOT sent as a multipart field — the NVCF
+      // function URL encodes the model and rejects `model=<anything>`.
+      expect(result.model).toBe("parakeet-ctc-0.6b-en");
       const form = fake.calls[0]!.body;
       if (form?.kind !== "formData") throw new Error("form kind");
-      expect((form.value as FormData).get("model")).toBe("parakeet-ctc-0.6b-en");
+      expect((form.value as FormData).has("model")).toBe(false);
     });
 
     it("respects model override from providerConfig.sttModel when req.model absent", async () => {
@@ -129,7 +133,7 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
         env: { NVIDIA_API_KEY: "k" },
       });
 
-      await provider.transcribeAudio({
+      const result = await provider.transcribeAudio({
         apiKey: "k",
         buffer: fakeAudio(),
         fileName: "a.wav",
@@ -138,9 +142,10 @@ describe("createNvidiaMediaUnderstandingProvider", () => {
         providerConfig: { sttModel: "parakeet-rnnt-1.1b" },
       });
 
+      expect(result.model).toBe("parakeet-rnnt-1.1b");
       const form = fake.calls[0]!.body;
       if (form?.kind !== "formData") throw new Error("form kind");
-      expect((form.value as FormData).get("model")).toBe("parakeet-rnnt-1.1b");
+      expect((form.value as FormData).has("model")).toBe(false);
     });
 
     it("uses req.baseUrl when provided", async () => {
@@ -367,7 +372,7 @@ describe("createNvidiaMediaUnderstandingProvider — profile-fallback (last-reso
     http.queueResponse({
       status: 200,
       headers: { "content-type": "application/json" },
-      body: { text: "hello from profile", model: "parakeet-ctc-1.1b-en-multilingual" },
+      body: { text: "hello from profile", model: "parakeet-ctc-1.1b-en-us" },
     });
     const { profileReader } = fakeProfileReader(
       'export NVIDIA_API_KEY="nvapi-stt-from-profile"\n',

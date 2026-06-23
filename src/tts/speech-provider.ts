@@ -26,7 +26,7 @@ import {
   NVIDIA_DEFAULT_TTS_MODEL,
   NVIDIA_DEFAULT_TTS_SAMPLE_RATE,
   NVIDIA_DEFAULT_TTS_VOICE,
-  NVIDIA_DEFAULT_BASE_URL,
+  NVIDIA_DEFAULT_BASE_URL_TTS,
   NVIDIA_TTS_AUDIO_FORMATS,
   NVIDIA_TTS_SAMPLE_RATES,
   type NvidiaTtsAudioFormat,
@@ -224,7 +224,7 @@ export function createNvidiaSpeechProvider(
     const apiKey = getApiKey(providerConfig);
 
     const baseUrl =
-      (typeof cfg.baseUrl === "string" && cfg.baseUrl.trim()) || NVIDIA_DEFAULT_BASE_URL;
+      (typeof cfg.baseUrl === "string" && cfg.baseUrl.trim()) || NVIDIA_DEFAULT_BASE_URL_TTS;
 
     const model =
       (typeof over.model === "string" && over.model.trim()) ||
@@ -400,7 +400,7 @@ export function createNvidiaSpeechProvider(
       const baseUrl =
         (typeof req.baseUrl === "string" && req.baseUrl) ||
         (typeof cfg.baseUrl === "string" && cfg.baseUrl) ||
-        NVIDIA_DEFAULT_BASE_URL;
+        NVIDIA_DEFAULT_BASE_URL_TTS;
 
       const voices = await voicesClient.listVoices({
         apiKey,

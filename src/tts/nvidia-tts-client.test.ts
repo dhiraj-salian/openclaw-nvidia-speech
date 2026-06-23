@@ -3,10 +3,35 @@ import { FakeHttpClient } from "../http/fake-http-client.js";
 import { NvidiaTtsClient } from "./nvidia-tts-client.js";
 import { NvSpeechError } from "../http/errors.js";
 
-describe("NvidiaTtsClient.synthesize", () => {
-  const BASE = "https://integrate.api.nvidia.com/v1";
+/**
+ * Returns the FormData instance from a fake call's body (asserted to be formData),
+ * plus a helper that reads each field out of it.
+ */
+function getFormData(call: { body?: { kind: string; value: unknown } }): {
+  text: string;
+  language: string;
+  voice: string;
+  sample_rate_hz: string;
+} {
+  if (!call.body) throw new Error("test bug: call.body missing");
+  expect(call.body.kind).toBe("formData");
+  const form = call.body.value as FormData;
+  // FormData entries are accessible via .get(). When the value is a string,
+  // this is exactly what the multipart writer serialized. For Blob-backed
+  // entries we'd need a different helper — but TTS only sends strings.
+  const get = (k: string): string => String(form.get(k) ?? "");
+  return {
+    text: get("text"),
+    language: get("language"),
+    voice: get("voice"),
+    sample_rate_hz: get("sample_rate_hz"),
+  };
+}
 
-  it("POSTs to {baseUrl}/audio/synthesize with correct shape and bearer auth", async () => {
+describe("NvidiaTtsClient.synthesize", () => {
+  const BASE = "https://877104f7-e885-42b9-8de8-f6e4c6303969.invocation.api.nvcf.nvidia.com/v1";
+
+  it("POSTs multipart to {baseUrl}/audio/synthesize with bearer auth and right fields", async () => {
     const fake = new FakeHttpClient();
     fake.queueResponse({
       status: 200,
@@ -35,18 +60,20 @@ describe("NvidiaTtsClient.synthesize", () => {
     expect(sent.method).toBe("POST");
     expect(sent.headers["Authorization"]).toBe("Bearer nvapi-test");
     expect(sent.headers["Accept"]).toBe("audio/wav");
-    expect(sent.body).toEqual({
-      kind: "json",
-      value: {
-        model: "magpie-tts-multilingual",
-        text: "Hello world",
-        voice_name: "Magpie-Multilingual.EN-US.Aria",
-        language_code: "en-US",
-        audio_format: "wav",
-        sample_rate_hz: 22050,
-        encoding: "LINEAR16",
-      },
-    });
+    expect(sent.headers["Content-Type"]).toBeUndefined(); // fetch sets multipart boundary
+
+    const fields = getFormData(sent);
+    expect(fields.text).toBe("Hello world");
+    expect(fields.language).toBe("en-US");
+    expect(fields.voice).toBe("Magpie-Multilingual.EN-US.Aria");
+    // Field names verified against Magpie /openapi.json on 2026-06-23:
+    // it is `sample_rate_hz`, NOT `sample_rate`. We don't send `format`,
+    // `stream`, or `model` (server picks defaults from the function URL).
+    expect(fields.sample_rate_hz).toBe("22050");
+    const form = sent.body?.value as FormData;
+    expect(form.has("format")).toBe(false);
+    expect(form.has("stream")).toBe(false);
+    expect(form.has("model")).toBe(false);
   });
 
   it("returns mp3 fileExtension when server returns audio/mpeg", async () => {
