@@ -8,10 +8,11 @@
 OpenClaw plugin that adds **NVIDIA TTS** (Magpie Multilingual) and **STT** (Parakeet CTC) capabilities using **only your existing `NVIDIA_API_KEY`**.
 
 - 🎙️ **TTS** — natural multilingual speech from the Magpie Multilingual family.
-- 🎤 **STT** — fast, accurate transcription from Parakeet CTC (multilingual variant).
+- 🎤 **STT** — fast, accurate transcription from Parakeet CTC (English on the bundled NVCF function).
 - 🔒 **No Google. No OpenAI. No Deepgram. No extra accounts.**
 - ⚡ **Zero runtime npm deps** — uses Node 22's built-in `fetch`, `FormData`, `Blob`.
-- 🧪 **116 unit + integration tests** — every layer verified offline before runtime.
+- 🧪 **168 unit + integration tests** — every layer verified offline before runtime.
+- 🌐 **Live-verified against NVIDIA NVCF endpoints** — TTS round-trip + STT round-trip both green against the real function IDs (Checkpoint 5, 2026-06-23).
 
 If you already pay for NVIDIA NIM access (it's free for the bundled models), this is the only plugin you need for voice in + voice out.
 
@@ -23,6 +24,7 @@ If you already pay for NVIDIA NIM access (it's free for the bundled models), thi
 - [Configure](#configure)
 - [Use](#use)
 - [API reference](#api-reference)
+- [Default endpoints (NVCF)](#default-endpoints-nvcf)
 - [Troubleshoot](#troubleshoot)
 - [Architecture](#architecture)
 - [Contributing](#contributing)
@@ -151,7 +153,7 @@ Just send a voice note from any supported channel (WhatsApp, Telegram, Feishu, M
 
 1. Detect the audio attachment.
 2. Pick the first eligible entry in `tools.media.audio.models` — your NVIDIA provider.
-3. POST the file as `multipart/form-data` to `https://integrate.api.nvidia.com/v1/audio/transcriptions`.
+3. POST the file as `multipart/form-data` to the Parakeet NVCF function (`/audio/transcriptions`).
 4. Inject `[Audio] <transcript>` into the conversation.
 
 > **Tip:** Add a local fallback for OOO cases:
@@ -171,7 +173,7 @@ Just send a voice note from any supported channel (WhatsApp, Telegram, Feishu, M
 | Provider id | Purpose | Default model | Auto-priority |
 |---|---|---|---|
 | `nvidia` (TTS) | SpeechProviderPlugin — Magpie Multilingual | `magpie-tts-multilingual` | n/a |
-| `nvidia` (STT) | MediaUnderstandingProviderPlugin — Parakeet CTC | `parakeet-ctc-1.1b-en-multilingual` | `50` (higher than ElevenLabs at 45) |
+| `nvidia` (STT) | MediaUnderstandingProviderPlugin — Parakeet CTC | `parakeet-ctc-1.1b-en-us` | `50` (higher than ElevenLabs at 45) |
 
 ### Per-provider config
 
@@ -183,9 +185,11 @@ Just send a voice note from any supported channel (WhatsApp, Telegram, Feishu, M
 | `messages.tts.providers.nvidia.language` | `string` | `en-US` | e.g. `en-US`, `hi-IN`, `de-DE`. |
 | `messages.tts.providers.nvidia.sampleRate` | `number` | `22050` | 8000 / 16000 / 22050 / 24000 / 44100 / 48000. |
 | `messages.tts.providers.nvidia.format` | `string` | `wav` | `wav` \| `mp3` \| `flac` \| `ogg` \| `opus`. |
-| `messages.tts.providers.nvidia.baseUrl` | `string` | `https://integrate.api.nvidia.com/v1` | Override for a proxy / private NIM. |
+| `messages.tts.providers.nvidia.baseUrl` | `string` | Magpie NVCF function URL | Override for a proxy / private NIM. |
 | `tools.media.audio.models[].provider` | `"nvidia"` | — | Required. |
-| `tools.media.audio.models[].model` | `string` | default above | Optional override. |
+| `tools.media.audio.models[].model` | `string` | default above | Ignored by the live API — the function URL pins the model. |
+| `tools.media.audio.models[].baseUrl` | `string` | Parakeet NVCF function URL | Override for a proxy / private NIM. |
+| `tools.media.audio.models[].language` | `string` | `en-US` | Required by the Parakeet NVCF function. Other BCP-47 tags return HTTP 400. |
 
 ### Inline TTS directives
 
@@ -199,6 +203,30 @@ Just send a voice note from any supported channel (WhatsApp, Telegram, Feishu, M
 | `provider` | `provider=nvidia` | **disallowed** by default |
 
 Enable `modelOverrides.allowProvider: true` if you want the assistant to switch providers mid-message.
+
+---
+
+## Default endpoints (NVCF)
+
+Unlike the bundled chat-completions plugin, NVIDIA's audio models live on
+**NVIDIA Cloud Functions** (NVCF), not on `integrate.api.nvidia.com`. Each
+model is a separate function with its own ID and URL.
+
+| Provider | Model | NVCF function ID | Endpoint |
+|---|---|---|---|
+| TTS (Magpie Multilingual) | `magpie-tts-multilingual` | `877104f7-e885-42b9-8de8-f6e4c6303969` | `{id}.invocation.api.nvcf.nvidia.com/v1/audio/synthesize` |
+| STT (Parakeet CTC English) | `parakeet-ctc-1.1b-en-us` | `1598d209-5e27-4d3c-8079-4751568b1081` | `{id}.invocation.api.nvcf.nvidia.com/v1/audio/transcriptions` |
+
+Override either with `messages.tts.providers.nvidia.baseUrl` or
+`tools.media.audio.models[].baseUrl` (full URL, no function-ID substitution).
+Type-checking stays strict — passing a model field to STT now returns HTTP 400.
+
+**Notes:**
+- Function IDs are deployment IDs. If NVIDIA rotates them you only need to
+  update `src/config/defaults.ts` (or override via env vars
+  `NVIDIA_TTS_BASE_URL` / `NVIDIA_STT_BASE_URL`).
+- The current Parakeet function is English-only (`en-US`). Multilingual
+  STT requires a separate NVCF function ID — tracked as a future enhancement.
 
 ---
 
@@ -260,7 +288,7 @@ openclaw doctor                             # catch config-shape errors
 | Config | `src/config/` | Static defaults, validators, `normalizeRawConfig`. |
 | Secrets | `src/utils/secret-resolver.ts` | API-key precedence chain; never logs. |
 | TTS | `src/tts/nvidia-tts-client.ts` | Raw `POST /audio/synthesize`. |
-| TTS | `src/tts/voices.ts` | `GET /audio/voices` with 1 h cache. |
+| TTS | `src/tts/voices.ts` | `GET /audio/list_voices` with 1 h cache (handles nested Magpie shape). |
 | TTS | `src/tts/speech-provider.ts` | The OpenClaw `SpeechProviderPlugin` boundary. |
 | STT | `src/stt/nvidia-stt-client.ts` | Raw `POST /audio/transcriptions` (multipart). |
 | STT | `src/stt/media-provider.ts` | The OpenClaw `MediaUnderstandingProviderPlugin` boundary. |

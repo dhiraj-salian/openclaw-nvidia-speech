@@ -23,7 +23,7 @@
     "nvidia": {
       "capabilities": ["audio"],
       "defaultModels": {
-        "audio": "parakeet-ctc-1.1b-en-multilingual"
+        "audio": "parakeet-ctc-1.1b-en-us"
       },
       "autoPriority": {
         "audio": 50
