@@ -1,7 +1,7 @@
-# `@dhiraj-salian/openclaw-nvidia-speech`
+# `openclaw-nvidia-speech`
 
 [![CI](https://github.com/dhiraj-salian/openclaw-nvidia-speech/actions/workflows/ci.yml/badge.svg)](https://github.com/dhiraj-salian/openclaw-nvidia-speech/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/%40dhiraj-salian%2Fopenclaw-nvidia-speech)](https://www.npmjs.com/package/@dhiraj-salian/openclaw-nvidia-speech)
+[![npm](https://img.shields.io/npm/v/openclaw-nvidia-speech)](https://www.npmjs.com/package/openclaw-nvidia-speech)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 [![OpenClaw Plugin](https://img.shields.io/badge/OpenClaw-plugin-blueviolet)](https://docs.openclaw.ai)
 
@@ -47,7 +47,7 @@ openclaw plugins install github:dhiraj-salian/openclaw-nvidia-speech
 ### B. From npm
 
 ```bash
-openclaw plugins install npm:@dhiraj-salian/openclaw-nvidia-speech
+openclaw plugins install npm:openclaw-nvidia-speech
 ```
 
 ### C. From a local checkout (dev / hot-reload)

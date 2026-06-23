@@ -2,7 +2,7 @@
 
 ## Overview
 
-A standalone, publishable OpenClaw plugin (`@dhirajpatra/openclaw-nvidia-speech`) that adds NVIDIA **TTS** (Magpie Multilingual) and **STT** (Parakeet CTC) capabilities to OpenClaw using only the user's existing NVIDIA API key.
+A standalone, publishable OpenClaw plugin (`openclaw-nvidia-speech`) that adds NVIDIA **TTS** (Magpie Multilingual) and **STT** (Parakeet CTC) capabilities to OpenClaw using only the user's existing NVIDIA API key.
 
 **Why it exists:** OpenClaw 2026.6.6 ships with no NVIDIA speech provider. The bundled `nvidia` plugin is chat-completions only. Users with an NVIDIA key cannot transcribe voice notes (STT) or synthesize replies aloud (TTS) without depending on Google/OpenAI/Deepgram. This plugin closes that gap.
 
@@ -82,7 +82,7 @@ A standalone, publishable OpenClaw plugin (`@dhirajpatra/openclaw-nvidia-speech`
 openclaw-nvidia-speech/
 ├── README.md                      # install, configure, use, troubleshoot
 ├── LICENSE                        # MIT
-├── package.json                   # @dhirajpatra/openclaw-nvidia-speech
+├── package.json                   # openclaw-nvidia-speech (bare name, post-rename 2026-06-23)
 ├── openclaw.plugin.json           # plugin manifest (contracts + setup)
 ├── tsconfig.json                  # strict, ESNext, NodeNext
 ├── vitest.config.ts               # test runner config
@@ -291,7 +291,7 @@ openclaw-nvidia-speech/
   - Size: M
 
 - [ ] **Task 19: GitHub repo + push**
-  - `git init`, first commit, create GitHub repo `dhirajpatra/openclaw-nvidia-speech`, push, protect main branch
+  - `git init`, first commit, create GitHub repo `dhiraj-salian/openclaw-nvidia-speech`, push, protect main branch
   - Size: S
 
 - [ ] **Task 20: GitHub Actions CI**
@@ -329,10 +329,10 @@ openclaw-nvidia-speech/
 
 ## Open Questions for Dhiraj
 
-1. **GitHub org:** `dhirajpatra/openclaw-nvidia-speech` or `dhiraj/openclaw-nvidia-speech` or your own org?
+1. ~~**GitHub org:** `dhirajpatra/openclaw-nvidia-speech` or `dhiraj/openclaw-nvidia-speech` or your own org?~~ **RESOLVED 2026-06-18:** `dhiraj-salian`. **REVISED 2026-06-23:** bare `openclaw-nvidia-speech` on npm; GitHub repo renamed to drop the user prefix via `gh repo rename`.
 2. **License:** MIT (default) or Apache-2.0?
 3. **Default voice:** Magpie ships several — `Magpie-Multilingual.EN-US.Aria` (female, en) is a safe default. Confirm?
-4. **STT model:** `parakeet-ctc-1.1b-en-multilingual` is multilingual + accurate. Confirm or prefer the English-only smaller `parakeet-ctc-0.6b` for speed?
+4. **STT model:** ~~`parakeet-ctc-1.1b-en-multilingual`~~. **RESOLVED 2026-06-23:** `parakeet-ctc-1.1b-en-us` (the actual model the Parakeet NVCF function ID `1598d209-…` loads). Multilingual STT deferred — requires a separate NVCF function.
 5. **ClawHub now or later?** Publishing needs `clawhub` CLI + account.
 6. **Should I remove the bundled `nvidia` chat provider?** (separate task — leaving for later unless you say so)
 

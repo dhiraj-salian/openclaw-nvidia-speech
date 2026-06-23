@@ -1,5 +1,5 @@
 {
-  "name": "@dhiraj-salian/openclaw-nvidia-speech",
+  "name": "openclaw-nvidia-speech",
   "version": "0.1.0",
   "description": "OpenClaw plugin: NVIDIA TTS (Magpie Multilingual) and STT (Parakeet CTC) using your NVIDIA API key. No Google, no OpenAI, no Deepgram.",
   "license": "MIT",
