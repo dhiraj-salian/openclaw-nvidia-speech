@@ -525,3 +525,186 @@ describe("createNvidiaMediaUnderstandingProvider — cfg + agentDir factory opti
     expect(http.calls[0]!.headers["Authorization"]).toBe("Bearer from-env-fallback");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Race condition: transcribeAudio called before eager resolve completes.
+// Bug discovered 2026-06-24 — first STT call after register() threw
+// MissingApiKeyError because `getApiKey` fell through to the legacy
+// resolveApiKey chain before the cached async resolver had populated.
+// Fix: `getApiKey` is now async and awaits the cached resolver on miss.
+// ---------------------------------------------------------------------------
+
+describe("createNvidiaMediaUnderstandingProvider — race condition (cache-cold first call)", () => {
+  // Local copy of the fake profile reader so this describe block is
+  // self-contained (the `fakeProfileReader` helper from the
+  // profile-fallback describe above is not in scope here).
+  function fakeProfileReaderForRace(contents: string | null): {
+    profileReader: { os: { homedir: () => string }; fs: { existsSync: () => boolean; readFileSync: () => string } };
+  } {
+    return {
+      profileReader: {
+        os: { homedir: () => "/home/fake" },
+        fs: {
+          existsSync: () => contents !== null,
+          readFileSync: () => contents ?? "",
+        },
+      },
+    };
+  }
+
+  it("transcribeAudio awaits the resolver when called before eager resolve completes", async () => {
+    // Bug repro: first call after register() with no env key. Pre-fix,
+    // getApiKey() would peek() → undefined → fall through to legacy
+    // resolveApiKey → throw MissingApiKeyError in ~1ms.
+    // Post-fix: getApiKey() awaits the cached resolver on miss.
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { text: "race-passed", model: "parakeet-ctc-1.1b-en-us" },
+    });
+
+    // Wire a profileReader that returns a key. The async resolver will
+    // (1) check env (empty), (2) check shell profile (returns key) and
+    // cache it. getApiKey awaits this on cache miss.
+    const { profileReader } = fakeProfileReaderForRace('export NVIDIA_API_KEY="nvapi-from-resolver"\n');
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      env: {},
+      profileReader,
+    });
+
+    // No `await` between factory and call — fire immediately, just like
+    // the gateway does when a WhatsApp voice memo lands right after boot.
+    const result = await provider.transcribeAudio({
+      buffer: Buffer.from([0x00]),
+      fileName: "race.wav",
+      mime: "audio/wav",
+      apiKey: "",
+      timeoutMs: 30_000,
+    });
+
+    expect(result.text).toBe("race-passed");
+    expect(http.calls[0]!.headers["Authorization"]).toBe(
+      "Bearer nvapi-from-resolver",
+    );
+  });
+
+  it("transcribeAudio resolves via env when present (smoke against the env path)", async () => {
+    // Belt-and-braces: confirms the env path still works after the
+    // async-await refactor.
+    const http = new FakeHttpClient();
+    http.queueResponse({
+      status: 200,
+      headers: { "content-type": "application/json" },
+      body: { text: "no-race", model: "parakeet-ctc-1.1b-en-us" },
+    });
+
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http,
+      env: { NVIDIA_API_KEY: "nvapi-resolved" },
+    });
+
+    const result = await provider.transcribeAudio({
+      buffer: Buffer.from([0x00]),
+      fileName: "race.wav",
+      mime: "audio/wav",
+      apiKey: "",
+      timeoutMs: 30_000,
+    });
+
+    expect(result.text).toBe("no-race");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isConfigured: synchronous probe for runtime's
+// isCapabilityProviderConfigured / auto-fallback selection.
+// Mirrors the TTS provider's isConfigured. Required because the runtime
+// calls isConfigured sync (no await).
+// ---------------------------------------------------------------------------
+
+describe("createNvidiaMediaUnderstandingProvider — isConfigured (sync)", () => {
+  function localFakeProfileReader(contents: string | null): {
+    profileReader: { os: { homedir: () => string }; fs: { existsSync: () => boolean; readFileSync: () => string } };
+  } {
+    const profileReader = {
+      os: { homedir: () => "/home/fake" },
+      fs: {
+        existsSync: () => contents !== null,
+        readFileSync: () => (contents ?? ""),
+      },
+    };
+    return { profileReader };
+  }
+
+  it("returns false when nothing is configured", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: {},
+    });
+    expect(provider.isConfigured({})).toBe(false);
+  });
+
+  it("returns true when env has NVIDIA_API_KEY", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: { NVIDIA_API_KEY: "k" },
+    });
+    expect(provider.isConfigured({})).toBe(true);
+  });
+
+  it("returns true when providerConfig.apiKey is provided", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: {},
+    });
+    expect(provider.isConfigured({ providerConfig: { apiKey: "k" } })).toBe(true);
+  });
+
+  it("returns true when providerConfig.apiKey is a SecretRef-like object", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: {},
+    });
+    expect(
+      provider.isConfigured({ providerConfig: { apiKey: { value: "k" } } }),
+    ).toBe(true);
+  });
+
+  it("returns true when shell profile has the key (profileReader wired)", () => {
+    const { profileReader } = localFakeProfileReader('export NVIDIA_API_KEY="k"\n');
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: {},
+      profileReader,
+    });
+    expect(provider.isConfigured({})).toBe(true);
+  });
+
+  it("returns false when profileReader returns null and env empty", () => {
+    const { profileReader } = localFakeProfileReader(null);
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: {},
+      profileReader,
+    });
+    expect(provider.isConfigured({})).toBe(false);
+  });
+
+  it("ignores empty-string providerConfig.apiKey", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: {},
+    });
+    expect(provider.isConfigured({ providerConfig: { apiKey: "   " } })).toBe(false);
+  });
+
+  it("works without a ctx argument (defensive default)", () => {
+    const provider = createNvidiaMediaUnderstandingProvider({
+      http: new FakeHttpClient(),
+      env: { NVIDIA_API_KEY: "k" },
+    });
+    expect(provider.isConfigured()).toBe(true);
+  });
+});

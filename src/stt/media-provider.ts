@@ -26,6 +26,7 @@ import {
 } from "../config/defaults.js";
 import {
   resolveApiKey,
+  readApiKeyFromProfile,
   createCachedNvidiaApiKeyResolver,
   type CachedNvidiaApiKeyResolver,
   type NvidiaAuthProfileConfig,
@@ -159,25 +160,45 @@ export function createNvidiaMediaUnderstandingProvider(
   }
 
   /**
-   * Resolve the API key synchronously using the best-known source at call
-   * time. Priority:
+   * Resolve the API key, preferring the cached auth-profile value but
+   * gracefully awaiting the in-flight async resolve on cache miss.
+   *
+   * Priority:
    *   1. `req.apiKey` (caller-provided direct key, e.g. from request auth).
    *   2. Explicit `providerConfig.apiKey` (string or SecretRef-like).
-   *   3. Cached value from the OpenClaw runtime auth-profile resolver.
-   *   4. Legacy chain: env → shell-profile reader.
+   *   3. Cached value from the OpenClaw runtime auth-profile resolver
+   *      (sync peek first).
+   *   4. Await the in-flight or fresh cached resolver — covers the
+   *      "first call after register() returns" race where eager resolve
+   *      hasn't completed yet. This is the bug fix for
+   *      https://github.com/dhiraj-salian/openclaw-nvidia-speech/issues/race-stt-key.
+   *   5. Legacy chain: env → shell-profile reader.
+   *
+   * Returns a Promise. Throws `MissingApiKeyError` only when ALL sources
+   * are empty.
    */
-  function getApiKey(
+  async function getApiKey(
     reqApiKey: string | undefined,
     providerConfig: Record<string, unknown> | undefined,
-  ): string {
+  ): Promise<string> {
     if (typeof reqApiKey === "string" && reqApiKey.trim().length > 0) {
       return reqApiKey.trim();
     }
     const cfg = providerConfig ?? {};
     const provided = coerceProvidedApiKey(cfg.apiKey);
     if (provided) return provided;
+    // Sync peek first — common case once the eager resolve has finished.
     const cached = cachedKey.peek();
     if (cached) return cached;
+    // Cache cold path: await the resolver. If `cfg` was wired into the
+    // factory, this hits the OpenClaw auth-profile store. If not, it
+    // falls through to the legacy env/profile chain via `resolveNvidiaApiKey`.
+    try {
+      return await cachedKey();
+    } catch {
+      // Re-throw the resolver's own MissingApiKeyError; otherwise fall
+      // through to the legacy chain as a last-resort attempt.
+    }
     return resolveApiKey({
       envVar,
       env,
@@ -191,10 +212,49 @@ export function createNvidiaMediaUnderstandingProvider(
     defaultModels: { audio: defaultModel },
     autoPriority: { audio: 50 },
 
+    /**
+     * Synchronous configuration probe — mirrors the TTS provider's
+     * `isConfigured` so the OpenClaw runtime can pick this provider
+     * during `isCapabilityProviderConfigured` / auto-fallback selection.
+     *
+     * Returns true when ANY of the following is configured:
+     *   - providerConfig.apiKey (explicit)
+     *   - cached auth-profile resolve (peek — non-blocking)
+     *   - process.env[envVar]
+     *   - shell profile fallback (best-effort sync read)
+     *
+     * If the auth-profile resolve is still in flight (first call after
+     * register), this returns false; the runtime will re-probe on the
+     * next capability lookup, by which time the cache should be warm.
+     */
+    isConfigured(ctx?: {
+      cfg?: Record<string, unknown>;
+      agentDir?: string;
+      providerConfig?: Record<string, unknown>;
+    }): boolean {
+      const cfg = (ctx?.providerConfig ?? {}) as Record<string, unknown>;
+      if (coerceProvidedApiKey(cfg.apiKey)) return true;
+      const cached = cachedKey.peek();
+      if (cached) return true;
+      const fromEnv = env[envVar];
+      if (typeof fromEnv === "string" && fromEnv.trim().length > 0) return true;
+      if (profileReader) {
+        try {
+          const fromProfile = readApiKeyFromProfile({ ...profileReader, envVar });
+          return typeof fromProfile === "string" && fromProfile.length > 0;
+        } catch {
+          return false;
+        }
+      }
+      return false;
+    },
+
     async transcribeAudio(req) {
-      // Resolve API key. Throw MissingApiKeyError if not configured; the
-      // runtime turns that into a user-friendly "no key" message.
-      const apiKey = getApiKey(req.apiKey, req.providerConfig);
+      // Resolve API key. Await the resolver so cache-cold calls (first
+      // request right after register) don't fall through to the legacy
+      // chain and throw MissingApiKeyError before the eager resolve
+      // finishes.
+      const apiKey = await getApiKey(req.apiKey, req.providerConfig);
 
       // Pull config from the standard `providerConfig` loose shape. The
       // runtime passes it via `req.request?.headers` / `req.auth`, but for
@@ -264,6 +324,16 @@ export interface NvidiaMediaUnderstandingProvider {
   readonly capabilities: readonly ["audio"];
   readonly defaultModels: { readonly audio: string };
   readonly autoPriority: { readonly audio: number };
+  /**
+   * Synchronous configuration probe. Used by the runtime's
+   * `isCapabilityProviderConfigured` / auto-fallback selector. Must be
+   * sync — see media-provider.ts `isConfigured` for details.
+   */
+  isConfigured(ctx?: {
+    readonly cfg?: Record<string, unknown>;
+    readonly agentDir?: string;
+    readonly providerConfig?: Record<string, unknown>;
+  }): boolean;
   transcribeAudio(req: {
     readonly buffer: Buffer;
     readonly fileName: string;
