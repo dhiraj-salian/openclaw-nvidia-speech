@@ -11,7 +11,6 @@ OpenClaw plugin that adds **NVIDIA TTS** (Magpie Multilingual) and **STT** (Para
 - 🎤 **STT** — fast, accurate transcription from Parakeet CTC (English on the bundled NVCF function).
 - 🔒 **No Google. No OpenAI. No Deepgram. No extra accounts.**
 - ⚡ **Zero runtime npm deps** — uses Node 22's built-in `fetch`, `FormData`, `Blob`.
-- 🧪 **168 unit + integration tests** — every layer verified offline before runtime.
 - 🌐 **Live-verified against NVIDIA NVCF endpoints** — TTS round-trip + STT round-trip both green against the real function IDs (Checkpoint 5, 2026-06-23).
 
 If you already pay for NVIDIA NIM access (it's free for the bundled models), this is the only plugin you need for voice in + voice out.
